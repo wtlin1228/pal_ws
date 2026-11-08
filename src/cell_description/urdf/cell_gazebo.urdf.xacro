@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- Ch 17 (optional, sketch): the cell with the Gazebo ros2_control plugin instead of the mock plugin.
+     Everything above the hardware plugin (controllers YAML, MoveIt config) is unchanged. -->
+<robot name="cell" xmlns:xacro="http://wiki.ros.org/xacro">
+  <xacro:include filename="$(find cell_description)/urdf/cell.urdf.xacro"/>
+
+  <xacro:macro name="ctrl_joint" params="name init">
+    <joint name="${name}">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">${init}</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+  </xacro:macro>
+
+  <ros2_control name="ur10e_system" type="system">
+    <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
+    <xacro:ctrl_joint name="shoulder_pan_joint"  init="0.0"/>
+    <xacro:ctrl_joint name="shoulder_lift_joint" init="-1.57"/>
+    <xacro:ctrl_joint name="elbow_joint"         init="1.57"/>
+    <xacro:ctrl_joint name="wrist_1_joint"       init="-1.57"/>
+    <xacro:ctrl_joint name="wrist_2_joint"       init="-1.57"/>
+    <xacro:ctrl_joint name="wrist_3_joint"       init="0.0"/>
+  </ros2_control>
+
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(find cell_moveit_config)/config/ros2_controllers.yaml</parameters>
+    </plugin>
+  </gazebo>
+</robot>

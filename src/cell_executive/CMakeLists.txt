@@ -22,5 +22,16 @@ ament_target_dependencies(executive rclcpp rclcpp_action std_msgs std_srvs visio
 target_link_libraries(executive cell_planning::cell_planning)
 
 install(TARGETS executive DESTINATION lib/${PROJECT_NAME})
+
+# Ch 17 (optional): the behavior-tree sketch builds only when behaviortree_cpp is installed AND the Executive
+# class has been moved into src/executive.hpp with public helpers (the exercise of the chapter).
+find_package(behaviortree_cpp QUIET)
+if(behaviortree_cpp_FOUND AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/executive.hpp)
+  add_executable(bt_executive src/bt_executive.cpp)
+  target_include_directories(bt_executive PUBLIC include src ${cell_motion_INCLUDE_DIRS})
+  ament_target_dependencies(bt_executive rclcpp rclcpp_action std_msgs std_srvs vision_msgs moveit_msgs shape_msgs tf2_ros tf2_eigen cell_interfaces behaviortree_cpp)
+  target_link_libraries(bt_executive cell_planning::cell_planning)
+  install(TARGETS bt_executive DESTINATION lib/${PROJECT_NAME})
+endif()
 install(DIRECTORY include/ DESTINATION include)
 ament_package()

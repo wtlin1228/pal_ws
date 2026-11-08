@@ -19,6 +19,7 @@
   <depend>cell_interfaces</depend>
   <depend>cell_planning</depend>
   <depend>cell_motion</depend>
+  <exec_depend>behaviortree_cpp</exec_depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>
