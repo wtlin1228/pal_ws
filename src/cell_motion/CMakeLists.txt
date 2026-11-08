@@ -18,6 +18,11 @@ target_include_directories(motion_demo PUBLIC include)
 ament_target_dependencies(motion_demo rclcpp moveit_ros_planning_interface moveit_msgs tf2_ros tf2_eigen geometry_msgs)
 target_link_libraries(motion_demo cell_planning::cell_planning)
 
-install(TARGETS motion_demo DESTINATION lib/${PROJECT_NAME})
+add_executable(grip_demo src/grip_demo.cpp)
+target_include_directories(grip_demo PUBLIC include)
+ament_target_dependencies(grip_demo rclcpp moveit_ros_planning_interface moveit_msgs tf2_ros tf2_eigen geometry_msgs cell_interfaces)
+target_link_libraries(grip_demo cell_planning::cell_planning)
+
+install(TARGETS motion_demo grip_demo DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 ament_package()
