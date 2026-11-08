@@ -24,6 +24,21 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Marker Scale: 0.5
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Boxes (world_model)
+      Topic:
+        Value: /world/markers
+    - Class: rviz_default_plugins/PointCloud2
+      Enabled: true
+      Name: Camera
+      Topic:
+        Value: /camera/points
+        Reliability Policy: Best Effort
+      Size (Pixels): 3
+      Style: Points
+      Color Transformer: AxisColor
+      Axis: Z
   Global Options:
     Fixed Frame: world
     Frame Rate: 30
