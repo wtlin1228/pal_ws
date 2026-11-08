@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="cell">
+    <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
+    <!-- Import the cell with its ros2_control tag (Ch 5). No generated ros2_control xacro: one block only. -->
+    <xacro:include filename="$(find cell_description)/urdf/cell_control.urdf.xacro" />
+</robot>

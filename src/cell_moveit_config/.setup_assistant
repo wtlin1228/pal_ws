@@ -1,0 +1,18 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: cell_description
+    relative_path: urdf/cell_control.urdf.xacro
+  srdf:
+    relative_path: config/cell.srdf
+  package_settings:
+    author_name: tutorial
+    author_email: tutorial@example.invalid
+    generated_timestamp: 1762560000
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros: []
