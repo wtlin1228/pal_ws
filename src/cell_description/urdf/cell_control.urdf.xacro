@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<robot name="cell" xmlns:xacro="http://wiki.ros.org/xacro">
+  <xacro:include filename="$(find cell_description)/urdf/cell.urdf.xacro"/>
+
+  <xacro:macro name="ctrl_joint" params="name init">
+    <joint name="${name}">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">${init}</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+  </xacro:macro>
+
+  <ros2_control name="ur10e_system" type="system">
+    <hardware>
+      <plugin>mock_components/GenericSystem</plugin>   <!-- state = command, instantly -->
+    </hardware>
+    <!-- a good "home": elbow bent, tool pointing down, in front of the robot -->
+    <xacro:ctrl_joint name="shoulder_pan_joint"  init="0.0"/>
+    <xacro:ctrl_joint name="shoulder_lift_joint" init="-1.57"/>
+    <xacro:ctrl_joint name="elbow_joint"         init="1.57"/>
+    <xacro:ctrl_joint name="wrist_1_joint"       init="-1.57"/>
+    <xacro:ctrl_joint name="wrist_2_joint"       init="-1.57"/>
+    <xacro:ctrl_joint name="wrist_3_joint"       init="0.0"/>
+  </ros2_control>
+</robot>

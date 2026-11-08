@@ -15,6 +15,7 @@
   <depend>cell_interfaces</depend>
   <depend>tf2_ros</depend>
   <depend>geometry_msgs</depend>
+  <depend>control_msgs</depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>
