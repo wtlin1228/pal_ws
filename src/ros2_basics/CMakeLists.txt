@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.8)
+project(ros2_basics)
+set(CMAKE_CXX_STANDARD 17)
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(example_interfaces REQUIRED)
+
+add_executable(photo_eye src/photo_eye.cpp)
+ament_target_dependencies(photo_eye rclcpp std_msgs)
+add_executable(suction src/suction.cpp)
+ament_target_dependencies(suction rclcpp std_srvs)
+add_executable(countdown src/countdown.cpp)
+ament_target_dependencies(countdown rclcpp rclcpp_action example_interfaces)
+
+install(TARGETS photo_eye suction countdown DESTINATION lib/${PROJECT_NAME})
+ament_package()
