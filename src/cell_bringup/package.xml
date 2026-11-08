@@ -9,6 +9,11 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>ros2_basics</exec_depend>
+  <exec_depend>cell_moveit_config</exec_depend>
+  <exec_depend>cell_sim</exec_depend>
+  <exec_depend>cell_perception</exec_depend>
+  <exec_depend>cell_motion</exec_depend>
+  <exec_depend>cell_executive</exec_depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>

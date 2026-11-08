@@ -7,5 +7,5 @@ def generate_launch_description():
         Node(package='cell_sim', executable='world_model', output='screen'),
         Node(package='cell_sim', executable='mock_gripper', output='screen'),
         Node(package='cell_sim', executable='mock_camera', output='screen',
-             parameters=[{'continuous_hz': 2.0}]),        # continuous while developing; triggered in Ch 13
+             parameters=[{'continuous_hz': 0.0}]),        # Ch 13: the executive triggers captures
     ])

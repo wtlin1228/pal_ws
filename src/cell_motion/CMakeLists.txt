@@ -38,4 +38,5 @@ target_link_libraries(pick_demo cell_planning::cell_planning)
 
 install(TARGETS motion_demo grip_demo pick_place_server pick_demo DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
+ament_export_include_directories(include)
 ament_package()
