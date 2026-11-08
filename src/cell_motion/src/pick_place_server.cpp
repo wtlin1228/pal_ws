@@ -1,10 +1,13 @@
 // Ch 11: the eight-stage pick-and-place as a ROS 2 action, keeping MoveIt's planning scene honest.
+// Ch 16: startup cleanup and a vacuum watchdog.
 #include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <atomic>
 #include <thread>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <moveit/planning_scene_interface/planning_scene_interface.hpp>
 #include <moveit_msgs/msg/collision_object.hpp>
@@ -24,7 +27,10 @@ public:
 
   void init() {                                              // needs shared_from_this(): not callable from the constructor
     robot_ = std::make_unique<cell_motion::Robot>(shared_from_this());
+    for (const auto & [id, obj] : scene_.getAttachedObjects()) robot_->mg().detachObject(id);   // Ch 16: no stale attachment survives a crash
     cb_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    vacuum_sub_ = create_subscription<std_msgs::msg::Bool>("gripper/vacuum", 10,
+      [this](std_msgs::msg::Bool::ConstSharedPtr m) { vacuum_ = m->data; });
     suction_ = create_client<SetSuction>("gripper/set_suction", rmw_qos_profile_services_default, cb_);
     server_ = rclcpp_action::create_server<PickPlace>(
       this, "pick_place",
@@ -86,8 +92,10 @@ private:
     attachBox(*g);
     stage("LIFT");
     if (!robot_->moveLinear(offset(g->pick_pose, -d)))  return fail("lift failed, still holding");
+    if (!vacuum_) return lost(*g, fail);                                    // Ch 16: the box is gone, not held
     stage("TRANSIT");
     if (!robot_->moveTo(offset(g->place_pose, -d)))     return fail("transit: no plan, still holding");
+    if (!vacuum_) return lost(*g, fail);
     stage("PLACE");
     if (!robot_->moveLinear(g->place_pose))             return fail("place failed, still holding");
     stage("RELEASE");
@@ -100,8 +108,17 @@ private:
     gh->succeed(res);
   }
 
+  template <typename Fail>
+  void lost(const PickPlace::Goal & g, Fail & fail) {
+    robot_->mg().detachObject(g.box_id);
+    scene_.removeCollisionObjects({g.box_id});
+    fail("vacuum lost");                                       // not 'still holding': the box is gone
+  }
+
   std::unique_ptr<cell_motion::Robot> robot_;
   moveit::planning_interface::PlanningSceneInterface scene_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr vacuum_sub_;
+  std::atomic<bool> vacuum_{false};
   rclcpp::CallbackGroup::SharedPtr cb_;
   rclcpp::Client<SetSuction>::SharedPtr suction_;
   rclcpp_action::Server<PickPlace>::SharedPtr server_;

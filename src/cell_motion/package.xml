@@ -19,6 +19,7 @@
   <depend>std_srvs</depend>
   <depend>vision_msgs</depend>
   <depend>shape_msgs</depend>
+  <depend>std_msgs</depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>

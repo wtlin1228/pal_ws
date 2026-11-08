@@ -1,4 +1,4 @@
-// Ch 13-15: depalletizing and palletizing jobs (single and mixed SKU) as an explicit state machine behind a RunJob action.
+// Ch 13-16: depalletizing and palletizing jobs (single and mixed SKU), with recovery as an explicit state machine behind a RunJob action.
 // Beliefs only: the last detection frame, the SKU table, and what it placed where. It never reads world_model.
 #include <algorithm>
 #include <chrono>
@@ -130,12 +130,12 @@ private:
       } else if (state == "PICK_PLACE") {
         const auto [ok, msg] = runPick(*goal);
         if (ok) {
-          ++moved; retries = 0;
+          ++moved; retries = 0; retries_ = 0;
           if (mode == "depalletize") { callTrigger(index_out_, 15s); state = "CAPTURE"; }
           else { plan_->confirm(); state = "FEED"; }
         } else { last_error_ = msg; state = "RECOVER"; }
       } else if (state == "RECOVER") {
-        ++retries;
+        ++retries; retries_ = retries;
         RCLCPP_ERROR(get_logger(), "recover (%d/3): %s", retries, last_error_.c_str());
         if (last_error_.find("still holding") != std::string::npos || retries > 3) { state = "FAILED"; continue; }
         state = mode == "depalletize" ? "CAPTURE" : "FEED";
@@ -161,8 +161,12 @@ private:
       T_box.translation().z() = top(d) - size.z / 2;
       std::vector<Neighbor> others;
       for (const auto & o : dets.detections) if (o.id != d.id) others.push_back({matFromPose(o.bbox.center), sizeOf(o)});
-      const auto [risk, T_pick] = bestGrasp(T_box, size, others);
+      auto [risk, T_pick] = bestGrasp(T_box, size, others);
       if (risk > 0.1) { RCLCPP_WARN(get_logger(), "%s: double-pick risk %.2f, trying the next box", d.id.c_str(), risk); continue; }
+      if (retries_ % 2) {                                                  // Ch 16: try the other yaw on a retry
+        const Isometry3d alt = graspCandidates(T_box, size)[1];
+        if (doublePickRisk(alt, others) <= 0.1) T_pick = alt;
+      }
       scene_.sync(dets, sizeOf);
       const Isometry3d T_wp = tf2::transformToEigen(buf_.lookupTransform("world", "pallet_frame", tf2::TimePointZero, tf2::durationFromSec(1.0)));
       const Isometry3d T_place = CONVEYOR_TOP * trans(0.0, 0.0, size.z) * rotX(M_PI);   // TCP at box-top height over the eye
@@ -171,7 +175,8 @@ private:
       g.pick_pose = stamped(T_wp * T_pick);
       g.place_pose = stamped(T_place);
       g.box_size.x = size.x; g.box_size.y = size.y; g.box_size.z = size.z;
-      RCLCPP_INFO(get_logger(), "%s: sku '%s' risk %.2f", d.id.c_str(), sku.c_str(), risk);
+      g.approach_distance = 0.15 + 0.05 * retries_;                        // Ch 16: a higher approach on each retry
+      RCLCPP_INFO(get_logger(), "%s: sku '%s' risk %.2f approach %.2f", d.id.c_str(), sku.c_str(), risk, g.approach_distance);
       return g;
     }
     return std::nullopt;                                                  // nothing safe: DONE, a person looks
@@ -215,6 +220,7 @@ private:
   std::mutex mtx_;
   Dets::ConstSharedPtr frame_;
   std::string last_error_;
+  int retries_ = 0;                                        // Ch 16: varies approach distance and grasp on retry
 };
 
 int main(int argc, char ** argv) {

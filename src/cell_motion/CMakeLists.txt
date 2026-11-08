@@ -15,6 +15,7 @@ find_package(cell_interfaces REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(shape_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 add_executable(motion_demo src/motion_demo.cpp)
 target_include_directories(motion_demo PUBLIC include)
@@ -28,7 +29,7 @@ target_link_libraries(grip_demo cell_planning::cell_planning)
 
 add_executable(pick_place_server src/pick_place_server.cpp)
 target_include_directories(pick_place_server PUBLIC include)
-ament_target_dependencies(pick_place_server rclcpp rclcpp_action moveit_ros_planning_interface moveit_msgs shape_msgs tf2_ros tf2_eigen geometry_msgs cell_interfaces)
+ament_target_dependencies(pick_place_server rclcpp rclcpp_action moveit_ros_planning_interface moveit_msgs shape_msgs std_msgs tf2_ros tf2_eigen geometry_msgs cell_interfaces)
 target_link_libraries(pick_place_server cell_planning::cell_planning)
 
 add_executable(pick_demo src/pick_demo.cpp)
