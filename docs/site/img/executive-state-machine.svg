@@ -1,0 +1,32 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 760 448' width='760' height='448' role='img' aria-label='Executive state machine' font-family='Roboto, Helvetica, Arial, sans-serif' font-size='13'>
+<defs><marker id='a' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='6' markerHeight='6' orient='auto-start-reverse'><path d='M0 0L10 5L0 10z' fill='#8b9499'/></marker><marker id='ag' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='6' markerHeight='6' orient='auto-start-reverse'><path d='M0 0L10 5L0 10z' fill='#646d72'/></marker></defs>
+<rect width='760' height='448' fill='white'/>
+<text x='24' y='28' font-size='15' text-anchor='start' font-weight='600' fill='#1d2326'>Depalletizing is a loop: capture, detect, pick, and recover when a stage fails</text>
+<path d='M230.0 104H290.0' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M470.0 104H550' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M620 136V168.0' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M690 104H720V392H710.0' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M620 232.0V264.0' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M530.0 296H450' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M310 296H230.0' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M380 264V152H160V136.0' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M120 264.0V136.0' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<path d='M140 328.0V360.0' fill='none' stroke='#8b9499' stroke-width='1.25' marker-end='url(#a)'/>
+<rect x='50.0' y='72.0' width='180' height='64' rx='8' fill='none' stroke='#8b9499' stroke-width='1.25'/><text x='140' y='96' font-size='13' text-anchor='middle' font-weight='600' fill='#1d2326'>CAPTURE</text><text x='140' y='116' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>trigger camera/capture</text>
+<rect x='290.0' y='72.0' width='180' height='64' rx='8' fill='none' stroke='#8b9499' stroke-width='1.25'/><text x='380' y='96' font-size='13' text-anchor='middle' font-weight='600' fill='#1d2326'>DETECT</text><text x='380' y='116' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>wait one /detections msg</text>
+<polygon points='550,104 620,72 690,104 620,136' fill='none' stroke='#8b9499' stroke-width='1.25'/><text x='620' y='108' font-size='13' text-anchor='middle' font-weight='400' fill='#1d2326'>boxes left?</text>
+<rect x='530.0' y='168.0' width='180' height='64' rx='8' fill='#e76125' fill-opacity='0.12' stroke='#e76125' stroke-width='2'/><text x='620' y='188' font-size='13' text-anchor='middle' font-weight='600' fill='#1d2326'>SELECT + SCENE</text><text x='620' y='206' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>highest box, SKU, grasp</text><text x='620' y='222' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>sync collision objects</text>
+<rect x='530.0' y='264.0' width='180' height='64' rx='8' fill='none' stroke='#8b9499' stroke-width='1.25'/><text x='620' y='288' font-size='13' text-anchor='middle' font-weight='600' fill='#1d2326'>PICK_PLACE</text><text x='620' y='308' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>send goal, watch stages</text>
+<polygon points='310,296 380,264 450,296 380,328' fill='none' stroke='#8b9499' stroke-width='1.25'/><text x='380' y='300' font-size='13' text-anchor='middle' font-weight='400' fill='#1d2326'>success?</text>
+<rect x='50.0' y='264.0' width='180' height='64' rx='8' fill='none' stroke='#8b9499' stroke-width='1.25'/><text x='140' y='288' font-size='13' text-anchor='middle' font-weight='600' fill='#1d2326'>RECOVER</text><text x='140' y='308' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>retreat; retry up to 3</text>
+<rect x='50.0' y='360.0' width='180' height='64' rx='8' fill='#d21419' fill-opacity='0.12' stroke='#d21419' stroke-width='2'/><text x='140' y='384' font-size='13' text-anchor='middle' font-weight='600' fill='#1d2326'>FAILED</text><text x='140' y='404' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>needs a person</text>
+<rect x='530.0' y='360.0' width='180' height='64' rx='8' fill='#2e8b57' fill-opacity='0.12' stroke='#2e8b57' stroke-width='2'/><text x='620' y='384' font-size='13' text-anchor='middle' font-weight='600' fill='#1d2326'>DONE</text><text x='620' y='404' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>no boxes detected</text>
+<text x='628' y='158' font-size='11.5' text-anchor='start' font-weight='400' fill='#646d72'>yes</text>
+<text x='705' y='96' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>no</text>
+<text x='628' y='254' font-size='11.5' text-anchor='start' font-weight='400' fill='#646d72'>PickPlace goal</text>
+<text x='490' y='286' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>result</text>
+<text x='270' y='286' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>no</text>
+<text x='270' y='146' font-size='11.5' text-anchor='middle' font-weight='400' fill='#646d72'>yes: next box</text>
+<text x='128' y='204' font-size='11.5' text-anchor='start' font-weight='400' fill='#646d72'>retry</text>
+<text x='148' y='350' font-size='11.5' text-anchor='start' font-weight='400' fill='#646d72'>give up</text>
+</svg>

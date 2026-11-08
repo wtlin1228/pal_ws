@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reading list — what existing docs, books and papers add to this tutorial</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html" class="current">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="reading-list-what-existing-docs-books-and-papers-add-to-this-tutorial">Reading list — what existing docs, books and papers add to this tutorial</h1>
+<p>Surveyed on 2026-11-08: the official ROS 2 Jazzy tutorials, MoveIt 2 tutorials, ros2_control docs, the Universal Robots ROS 2 tutorials, two current ROS 2 books, Zivid's (de)palletization guide, and the recent research on robot bin packing and parcel detection. Verdict: the chapter structure holds; seven things were worth borrowing, and they are linked from the chapters they belong to ("Go deeper" sections).</p>
+<h2 id="worth-borrowing">Worth borrowing</h2>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>What it adds</th>
+<th>Lands in</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://docs.universal-robots.com/Universal_Robots_ROS2_Documentation/doc/ur_tutorials/my_robot_cell/doc/index.html">UR ROS 2 tutorials: Custom workcell</a></td>
+<td>The vendor's own version of Ch 3–6: a workcell description package, the driver started with that description (mock or real), and a MoveIt config on top. Same three-package split as ours, so it is the shortest path from this tutorial to a real UR.</td>
+<td>Ch 3, 5, 6, 18</td>
+</tr>
+<tr>
+<td><a href="https://github.com/ros-planning/moveit2_tutorials/blob/main/doc/examples/examples.rst">MoveIt 2 examples index</a>: Pick and Place with MoveIt Task Constructor, Planning Scene ROS API, Perception Pipeline, Hand-Eye Calibration</td>
+<td>MTC is MoveIt's framework for exactly the stage sequence <code>pick_place_server</code> hand-rolls; the perception pipeline builds an octomap from the camera so the planner avoids the whole stack; hand-eye calibration is the step every real camera needs.</td>
+<td>Ch 11, 13, 18</td>
+</tr>
+<tr>
+<td><a href="https://docs.ros.org/en/jazzy/p/hardware_interface/doc/writing_new_hardware_component.html">ros2_control: Writing a hardware component</a> and <a href="https://control.ros.org/jazzy/doc/api/classros2__control__demo__example__7_1_1RobotSystem.html">demos example 7</a> (a 6-axis arm with its own hardware plugin and controller)</td>
+<td>What replaces <code>mock_components/GenericSystem</code> when you talk to a controller yourself: <code>on_init</code>, <code>read()</code>, <code>write()</code>.</td>
+<td>Ch 5, 18</td>
+</tr>
+<tr>
+<td><a href="https://support.zivid.com/en/latest/camera/academy/applications/depalletization-tutorial.html">Zivid: Depalletization and Palletization Tutorial</a></td>
+<td>A camera vendor's field guide: which object features a camera must see, camera placement for stationary vs on-arm mounting, 2D + 3D capture strategy, settings against a time budget, capturing while the robot moves to cut cycle time, production preparation (warm-up, in-field verification, hand-eye, ROI filtering) and maintenance.</td>
+<td>Ch 9, 13, 18</td>
+</tr>
+<tr>
+<td><a href="https://arxiv.org/pdf/2512.04415">RoboBPP benchmark</a> (arXiv 2512.04415, 2026)</td>
+<td>An open benchmark for robotic online bin packing with a physics simulator, three real industrial box datasets and a leaderboard: realistic box sequences for Ch 15 and a physics check for Ch 17.</td>
+<td>Ch 15, 17</td>
+</tr>
+<tr>
+<td><a href="https://motion.cs.illinois.edu/papers/ICRA2019-Wang-BinPacking.pdf">Wang &amp; Hauser, ICRA 2019</a> and <a href="https://web3.arxiv.org/pdf/2507.09123">Gao et al., 2025</a></td>
+<td>The heightmap-minimization heuristic that Ch 15 simplifies, with stability and robot-packability constraints; a fast stability validation for online packing.</td>
+<td>Ch 15</td>
+</tr>
+<tr>
+<td><a href="https://www.ce.unipr.it/~rizzini/papers/monica20irc.pdf">Monica, Aleotti, Lodi Rizzini, IRC 2020</a></td>
+<td>Box detection for tightly packed parcels from a ToF camera using edges from the intensity image plus depth discontinuities: what to do when the gaps Ch 10 relies on are not there.</td>
+<td>Ch 10</td>
+</tr>
+</tbody>
+</table>
+<h2 id="general-companions">General companions</h2>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Use it for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate.html">ROS 2 Jazzy tutorials, Intermediate</a> and <a href="https://docs.ros.org/en/jazzy/Tutorials/Launch/Using-ROS2-Launch-for-Large-Projects.html">launch for large projects</a></td>
+<td>The official versions of Ch 1, 2, 4 and 16: tf2 broadcasters and listeners, launch substitutions and event handlers, <code>launch_testing</code>, recording and reading bags from a node.</td>
+</tr>
+<tr>
+<td><a href="https://www.packtpub.com/product/mastering-ros-2-for-robotics-programming/9781836209010">Mastering ROS 2 for Robotics Programming, 4th ed. (Packt, July 2025)</a></td>
+<td>Jazzy-based book with chapters on ros2_control, BehaviorTree.CPP, MoveIt 2, the perception stack and CI; the natural next book after this tutorial.</td>
+</tr>
+<tr>
+<td><a href="https://service-library.mfu.ac.th/bookshop/detail.php?id=4823">A Concise Introduction to Robot Programming with ROS 2 (CRC Press, 2025)</a></td>
+<td>C++-first fundamentals, a complete simulated robot, testing strategies and behavior trees; the same language choice as this tutorial.</td>
+</tr>
+<tr>
+<td><a href="https://mikelikesrobots.github.io/blog/moveit-task-constructor">Mike Likes Robots: MoveIt Task Constructor walkthrough</a> and <a href="https://automaticaddison.com/?p=17329">Automatic Addison: pick and place with MTC and perception (Jazzy)</a></td>
+<td>Two readable, working MTC examples, one with PCL-based perception, if you take the Ch 11 optional port.</td>
+</tr>
+<tr>
+<td><a href="https://www.zivid.com/applications/robotic-palletization-and-depalletization-with-3d-vision">Zivid: robotic (de)palletization overview</a></td>
+<td>What production cells look like, including a Mujin depalletizing demo with a Zivid camera.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="not-borrowed">Not borrowed</h2>
+<p>MoveIt Pro, Isaac Sim and learned (CNN) box segmentation were left out: they are either commercial, GPU-bound in a VM, or need training data you do not have. The structure here lets you add any of them later behind the same <code>/detections</code> and <code>PickPlace</code> interfaces.</p><footer><a class="prev" href="ch18.html">&larr; Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>

@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch 12 — Single-SKU pallet patterns (week 8)</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html" class="current">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="ch-12-single-sku-pallet-patterns-week-8">Ch 12 — Single-SKU pallet patterns (week 8)</h1>
+<p>Goal: a header-only pattern generator (<code>cell_planning/patterns.hpp</code>) that turns a pallet size, a box size and a gap into layers, alternates two layer designs so the stack interlocks, and orders the placements so the arm never reaches over a box it just placed. Ch 14 feeds its output to the robot.</p>
+<h2 id="vocabulary">Vocabulary</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+<th>In this tutorial</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Layer pattern</td>
+<td>list of (x, y, yaw) for one layer in <code>pallet_frame</code></td>
+<td><code>std::vector&lt;Place&gt;</code></td>
+</tr>
+<tr>
+<td>Column stacking</td>
+<td>every layer identical; seams line up; fast but unstable</td>
+<td><code>stack(n)</code> with the same layer twice</td>
+</tr>
+<tr>
+<td>Interlocking</td>
+<td>alternate two patterns so seams land on box interiors</td>
+<td><code>stack(n)</code> alternates A and B</td>
+</tr>
+<tr>
+<td>Utilization</td>
+<td>box footprint area / deck area</td>
+<td><code>utilization()</code></td>
+</tr>
+<tr>
+<td>Overhang</td>
+<td>how far a box may stick out past the deck edge</td>
+<td><code>fits(…, overhang)</code></td>
+</tr>
+<tr>
+<td>Place order</td>
+<td>sequence within a layer: far side first, then toward the robot</td>
+<td><code>placeOrder()</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="cell_planningincludecell_planningpatternshpp"><code>cell_planning/include/cell_planning/patterns.hpp</code></h2>
+<pre><code class="language-cpp">#pragma once
+#include &lt;algorithm&gt;
+#include &lt;array&gt;
+#include &lt;cmath&gt;
+#include &lt;utility&gt;
+#include &lt;vector&gt;
+#include &lt;cell_planning/geometry.hpp&gt;
+#include &lt;cell_planning/grasps.hpp&gt;      // BoxSize
+
+namespace cell_planning {
+
+// Layer patterns in pallet_frame: x along the 0.8 m side, y along the 0.6 m side, origin at the deck center.
+constexpr std::array&lt;double, 2&gt; PALLET = {0.80, 0.60};     // x, y [m]
+constexpr BoxSize SKU_A{0.30, 0.18, 0.15};                  // x, y, z [m]
+constexpr double GAP = 0.02;
+
+struct Place { double x, y, yaw; };   // box center in pallet_frame; yaw 0: box x along pallet x, pi/2: box x along pallet y
+struct Row { int n; double yaw; };
+
+/// Extent along pallet x and y for yaw 0 or pi/2.
+inline std::pair&lt;double, double&gt; footprint(const BoxSize &amp; box, double yaw) {
+  return std::abs(yaw) &lt; 1e-9 ? std::pair&lt;double, double&gt;{box.x, box.y} : std::pair&lt;double, double&gt;{box.y, box.x};
+}
+
+/// n boxes side by side along x, centered, all at row center y.
+inline std::vector&lt;Place&gt; row(int n, double yaw, double y, const BoxSize &amp; box = SKU_A, double gap = GAP) {
+  const auto [w, d] = footprint(box, yaw);
+  const double x0 = -(n * w + (n - 1) * gap) / 2;
+  std::vector&lt;Place&gt; out;
+  for (int i = 0; i &lt; n; ++i) out.push_back({x0 + w / 2 + i * (w + gap), y, yaw});
+  return out;
+}
+
+/// Rows stacked along y, the whole block centered on the deck.
+inline std::vector&lt;Place&gt; layerFromRows(const std::vector&lt;Row&gt; &amp; rows, const BoxSize &amp; box = SKU_A, double gap = GAP) {
+  double total = gap * (rows.size() - 1);
+  for (const auto &amp; r : rows) total += footprint(box, r.yaw).second;
+  double y = -total / 2;
+  std::vector&lt;Place&gt; places;
+  for (const auto &amp; r : rows) {
+    const double d = footprint(box, r.yaw).second;
+    for (const auto &amp; p : row(r.n, r.yaw, y + d / 2, box, gap)) places.push_back(p);
+    y += d + gap;
+  }
+  return places;
+}
+
+inline bool fits(const std::vector&lt;Place&gt; &amp; places, const BoxSize &amp; box = SKU_A, double overhang = 0.0) {
+  for (const auto &amp; p : places) {
+    const auto [w, d] = footprint(box, p.yaw);
+    if (std::abs(p.x) + w / 2 &gt; PALLET[0] / 2 + overhang + 1e-9 || std::abs(p.y) + d / 2 &gt; PALLET[1] / 2 + overhang + 1e-9) return false;
+  }
+  return true;
+}
+
+/// True if any two footprints intersect (yaw 0 / pi/2 only).
+inline bool overlaps(const std::vector&lt;Place&gt; &amp; places, const BoxSize &amp; box = SKU_A) {
+  for (std::size_t i = 0; i &lt; places.size(); ++i) {
+    const auto [wa, da] = footprint(box, places[i].yaw);
+    for (std::size_t j = i + 1; j &lt; places.size(); ++j) {
+      const auto [wb, db] = footprint(box, places[j].yaw);
+      if (std::abs(places[i].x - places[j].x) &lt; (wa + wb) / 2 - 1e-9 &amp;&amp; std::abs(places[i].y - places[j].y) &lt; (da + db) / 2 - 1e-9) return true;
+    }
+  }
+  return false;
+}
+
+inline double utilization(const std::vector&lt;Place&gt; &amp; places, const BoxSize &amp; box = SKU_A) {
+  return places.size() * box.x * box.y / (PALLET[0] * PALLET[1]);
+}
+
+inline const std::vector&lt;Place&gt; &amp; layerA() { static const auto L = layerFromRows({{2, 0.0}, {2, 0.0}, {2, 0.0}}); return L; }   // 2 x 3 grid, long side along x
+inline const std::vector&lt;Place&gt; &amp; layerB() { static const auto L = layerFromRows({{4, M_PI / 2}, {2, 0.0}}); return L; }       // 4 across + 2 along: the seams move
+
+/// Alternate A and B so the vertical seams of one layer land on box interiors of the next.
+inline std::vector&lt;std::vector&lt;Place&gt;&gt; stack(int layers) {
+  std::vector&lt;std::vector&lt;Place&gt;&gt; s;
+  for (int L = 0; L &lt; layers; ++L) s.push_back(L % 2 ? layerB() : layerA());
+  return s;
+}
+
+/// Far side first: the robot stands at negative y of the pallet, so place large y first.
+inline std::vector&lt;Place&gt; placeOrder(std::vector&lt;Place&gt; layer) {
+  std::sort(layer.begin(), layer.end(), [](const Place &amp; a, const Place &amp; b) { return a.y != b.y ? a.y &gt; b.y : a.x &lt; b.x; });
+  return layer;
+}
+
+/// Pose of the box center in pallet_frame; layers rest directly on each other.
+inline Isometry3d boxPose(const Place &amp; p, int layer_index, const BoxSize &amp; box = SKU_A) {
+  return trans(p.x, p.y, layer_index * box.z + box.z / 2) * rotZ(p.yaw);
+}
+
+}  // namespace cell_planning
+</code></pre>
+<p>Layer A is exactly the scene <code>spawn_scene</code> builds (x = ±0.16, y = −0.2, 0, 0.2). Layer B puts four boxes across the near half and two along the far half; its seams fall at different x and y than A's. Both hold 6 boxes at 67 % utilization.</p>
+<p><img src="img/layers-a-b.svg" alt="Layers A and B: the same six boxes with their seams at different places" style="max-width:100%"></p>
+<p>Stack A, B, A: no vertical seam continues through two layers, which is what keeps a column-stacked pallet from splitting under transport.</p>
+<pre><code class="language-cpp">// cell_planning/test/test_patterns.cpp   (add `ament_add_gtest(test_patterns test/test_patterns.cpp)` + link)
+#include &lt;gtest/gtest.h&gt;
+#include &lt;cell_planning/patterns.hpp&gt;
+
+using namespace cell_planning;
+
+TEST(Patterns, LayersAreValid) {
+  for (const auto * L : {&amp;layerA(), &amp;layerB()}) { EXPECT_EQ(L-&gt;size(), 6u); EXPECT_TRUE(fits(*L)); EXPECT_FALSE(overlaps(*L)); }
+}
+
+TEST(Patterns, StackAlternates) {
+  const auto s = stack(3);
+  EXPECT_EQ(s[0][0].yaw, 0.0); EXPECT_EQ(s[1][0].yaw, M_PI / 2); EXPECT_EQ(s[2][0].yaw, 0.0);   // B starts with the rotated row
+}
+
+TEST(Patterns, PlaceOrderFarFirst) {
+  const auto order = placeOrder(layerA());
+  for (std::size_t i = 1; i &lt; order.size(); ++i) EXPECT_GE(order[i - 1].y, order[i].y);
+}
+
+TEST(Patterns, BigSkuDoesNotFitWithGap) {
+  const BoxSize C{0.40, 0.30, 0.20};
+  EXPECT_FALSE(fits(layerFromRows({{2, 0.0}, {2, 0.0}}, C), C));   // 0.4 + 0.02 + 0.4 &gt; 0.8
+}
+</code></pre>
+<h2 id="see-it">See it</h2>
+<p>In C++ the natural viewer is RViz: a small node publishes both layers as markers in <code>pallet_frame</code>, layer A at the deck and layer B one layer up, with the placement order as text.</p>
+<pre><code class="language-cpp">// cell_planning/src/show_pattern.cpp   (add_executable + ament_target_dependencies(rclcpp visualization_msgs) + install)
+#include &lt;rclcpp/rclcpp.hpp&gt;
+#include &lt;visualization_msgs/msg/marker_array.hpp&gt;
+#include &lt;cell_planning/patterns.hpp&gt;
+
+using namespace cell_planning;
+
+int main(int argc, char ** argv) {
+  rclcpp::init(argc, argv);
+  auto node = rclcpp::Node::make_shared(&quot;show_pattern&quot;);
+  auto pub = node-&gt;create_publisher&lt;visualization_msgs::msg::MarkerArray&gt;(&quot;pattern/markers&quot;, rclcpp::QoS(1).transient_local());
+  visualization_msgs::msg::MarkerArray arr;
+  int id = 0;
+  for (int L : {0, 1}) {
+    const auto &amp; layer = L ? layerB() : layerA();
+    int order = 1;
+    for (const auto &amp; p : placeOrder(layer)) {
+      visualization_msgs::msg::Marker m;
+      m.header.frame_id = &quot;pallet_frame&quot;; m.ns = &quot;pattern&quot;; m.id = id++;
+      m.type = m.CUBE; m.action = m.ADD;
+      m.pose = poseFromMat(boxPose(p, L));
+      m.scale.x = SKU_A.x; m.scale.y = SKU_A.y; m.scale.z = SKU_A.z;
+      m.color.r = 0.91f; m.color.g = 0.38f; m.color.b = 0.15f; m.color.a = 0.8f;
+      arr.markers.push_back(m);
+      visualization_msgs::msg::Marker t = m;
+      t.id = id++; t.type = t.TEXT_VIEW_FACING; t.text = std::to_string(order++);
+      t.pose.position.z += SKU_A.z / 2 + 0.02; t.scale.z = 0.06; t.color.r = t.color.g = t.color.b = 1.0f;
+      arr.markers.push_back(t);
+    }
+  }
+  pub-&gt;publish(arr);                                  // latched: RViz gets it whenever it subscribes
+  RCLCPP_INFO(node-&gt;get_logger(), &quot;layers A (deck) and B (one layer up) published on pattern/markers&quot;);
+  rclcpp::spin(node);
+  rclcpp::shutdown();
+}
+</code></pre>
+<p>Add a MarkerArray display on <code>pattern/markers</code> in RViz (Durability Policy: Transient Local). Numbers are the placement order; 1 is farthest from the robot.</p>
+<p>Real cell: pattern design is usually a separate tool (a pattern editor or an optimizer) that outputs a pattern file per SKU. The planner in the cell only reads it. Overhang, interlock quality and the maximum stack height are typically customer rules, not computed on the fly.</p>
+<h2 id="checkpoint">Checkpoint</h2>
+<ul>
+<li>[ ] <code>colcon test --packages-select cell_planning</code> passes, including the four pattern tests</li>
+<li>[ ] <code>show_pattern</code> draws both layers in RViz; no box crosses the deck outline</li>
+<li>[ ] You designed a layer for SKU C (0.40 × 0.30) that fits with <code>GAP = 0.02</code> and wrote it as <code>layerFromRows(...)</code> (hint: rotate; 2 boxes across the 0.8 m side need 0.62 m)</li>
+<li>[ ] You wrote <code>seamOverlap(a, b)</code> that returns how much of layer B's seam length lies over a box interior of layer A, and confirmed it is higher for A/B than for A/A</li>
+</ul>
+<h2 id="questions">Questions</h2>
+<ol>
+<li>Why place the far rows first?</li>
+<li>Layer B has four boxes rotated 90° on the near side. What changes in Ch 11's grasp when the pad has to place a rotated box?</li>
+</ol>
+<p>Answers: <a href="appendix.html">Appendix</a></p><footer><a class="prev" href="ch11.html">&larr; Ch 11 — Pick planning and the planning scene (week 7)</a><a class="next" href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8) &rarr;</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>

@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html" class="current">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="ch-8-the-digital-twin-world-model-boxes-mock-suction-gripper-week-5">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</h1>
+<p>Goal: a <code>world_model</code> node that holds the truth of the cell (every box, where it is, who holds it) and a <code>mock_gripper</code> that behaves like a vacuum ejector. At the end you pick a box from the pallet and drop it on the conveyor, with the robot of Ch 7.</p>
+<h2 id="truth-versus-belief">Truth versus belief</h2>
+<p>The twin has two sides. <code>world_model</code> is <strong>truth</strong>; only mock devices may read it. The robot software (executive, planner, motion) may only know what the mock camera and mock sensors tell it: <strong>belief</strong>. If you ever import <code>world_model</code> state into the executive, the tutorial stops teaching you anything.</p>
+<table>
+<thead>
+<tr>
+<th>Node</th>
+<th>Owns</th>
+<th>Interfaces</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>world_model</code></td>
+<td>boxes, held box, mock gravity</td>
+<td><code>world/spawn_box</code>, <code>world/get_boxes</code>, <code>world/reset</code>, <code>world/grip</code> (SetBool), topics <code>world/boxes</code>, <code>world/markers</code>, TF <code>box_&lt;id&gt;</code></td>
+</tr>
+<tr>
+<td><code>mock_gripper</code></td>
+<td>vacuum state, response delay</td>
+<td><code>gripper/set_suction</code> (SetSuction), topic <code>gripper/vacuum</code> (Bool)</td>
+</tr>
+<tr>
+<td><code>spawn_scene</code></td>
+<td>nothing; a CLI</td>
+<td>fills the pallet with a named scene</td>
+</tr>
+</tbody>
+</table>
+<p>Language note: the twin is the one part of this tutorial that stays in Python. It mocks devices you throw away on a real cell, Python is quicker for that, and none of it runs on the robot side. Everything that talks to it from the robot side, starting with <code>grip_demo</code> below, is C++.</p>
+<pre><code class="language-bash">cd ~/pal_ws/src &amp;&amp; ros2 pkg create --build-type ament_python cell_sim \
+  --dependencies rclpy std_srvs geometry_msgs visualization_msgs tf2_ros cell_interfaces
+</code></pre>
+<p>The Python twin needs the same geometry helpers as the C++ side; keep a small <code>cell_sim/geometry.py</code> (NumPy + SciPy, ~30 lines: <code>mat_from_pose</code>, <code>mat_from_tf</code>, <code>pose_from_mat</code>, <code>trans</code>) next to the nodes. It is test equipment, not robot software.</p>
+<h2 id="cell_simcell_simworld_modelpy"><code>cell_sim/cell_sim/world_model.py</code></h2>
+<pre><code class="language-python">import copy, numpy as np, rclpy
+from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.duration import Duration
+from std_srvs.srv import Trigger, SetBool
+from geometry_msgs.msg import TransformStamped, Vector3
+from visualization_msgs.msg import Marker, MarkerArray
+from tf2_ros import Buffer, TransformListener, TransformBroadcaster, TransformException
+from cell_interfaces.msg import Box, BoxArray
+from cell_interfaces.srv import SpawnBox, GetBoxes
+from cell_sim.geometry import mat_from_pose, mat_from_tf, pose_from_mat, trans
+
+PALLET   = dict(x=0.0,  y=0.75, z=0.144, sx=0.8, sy=0.6)   # deck top center and size, world frame
+CONVEYOR = dict(x=-0.9, y=0.0,  z=0.70,  sx=0.5, sy=1.5)
+SKU_COLORS = {'A': (0.91, 0.38, 0.15), 'B': (0.39, 0.43, 0.45), 'C': (0.82, 0.08, 0.10)}
+
+class WorldModel(Node):
+    &quot;&quot;&quot;Single source of truth for the mocked cell. Mock devices read it; robot software must not.&quot;&quot;&quot;
+
+    def __init__(self):
+        super().__init__('world_model')
+        self.boxes: dict[str, Box] = {}          # id -&gt; Box, poses always in 'world'
+        self.held: str | None = None
+        self.T_tcp_box = None                     # fixed offset while a box is held
+        self.buf = Buffer(); self.tf_listener = TransformListener(self.buf, self)
+        self.br = TransformBroadcaster(self)
+        cb = ReentrantCallbackGroup()
+        self.create_service(SpawnBox, 'world/spawn_box', self.spawn, callback_group=cb)
+        self.create_service(GetBoxes, 'world/get_boxes', self.get_boxes, callback_group=cb)
+        self.create_service(Trigger, 'world/reset', self.reset, callback_group=cb)
+        self.create_service(SetBool, 'world/grip', self.grip, callback_group=cb)
+        self.pub_boxes = self.create_publisher(BoxArray, 'world/boxes', 10)
+        self.pub_markers = self.create_publisher(MarkerArray, 'world/markers', 10)
+        self.create_timer(0.1, self.tick)
+
+    # ---- services -----------------------------------------------------------------
+    def spawn(self, req, res):
+        box = copy.deepcopy(req.box)
+        if box.pose.header.frame_id != 'world':          # store everything in one frame
+            try:
+                tf = self.buf.lookup_transform('world', box.pose.header.frame_id, rclpy.time.Time(),
+                                               timeout=Duration(seconds=2.0))
+            except TransformException as e:                 # TF not up yet: answer, never hang the caller
+                res.success, res.message = False, f'no transform for {box.pose.header.frame_id}: {e}'; return res
+            box.pose.pose = pose_from_mat(mat_from_tf(tf.transform) @ mat_from_pose(box.pose.pose))
+            box.pose.header.frame_id = 'world'
+        box.location = self.location_of(box)
+        self.boxes[box.id] = box
+        res.success, res.message = True, f'spawned {box.id} on {box.location}'
+        return res
+
+    def get_boxes(self, req, res):
+        res.boxes = [b for b in self.boxes.values() if not req.location or b.location == req.location]
+        return res
+
+    def reset(self, req, res):
+        self.boxes.clear(); self.held = None
+        res.success = True; return res
+
+    def grip(self, req, res):
+        &quot;&quot;&quot;on: attach the box whose top face is under the TCP. off: release it and let it settle.&quot;&quot;&quot;
+        try:
+            T_world_tcp = mat_from_tf(self.buf.lookup_transform('world', 'tcp', rclpy.time.Time()).transform)
+        except TransformException as e:
+            res.success, res.message = False, str(e); return res
+        if req.data:
+            hit = self.box_under(T_world_tcp)
+            if hit is None:
+                res.success, res.message = False, 'no box under the pad'; return res
+            self.held = hit
+            self.T_tcp_box = np.linalg.inv(T_world_tcp) @ mat_from_pose(self.boxes[hit].pose.pose)
+            self.boxes[hit].location = 'gripper'
+            res.success, res.message = True, f'holding {hit}'
+        else:
+            if self.held:
+                box, self.held = self.boxes[self.held], None
+                self.settle(box)
+            res.success, res.message = True, 'released'
+        return res
+
+    # ---- mock physics ---------------------------------------------------------------
+    def box_under(self, T_world_tcp, tol=0.02):
+        p = np.append(T_world_tcp[:3, 3], 1.0)
+        for b in self.boxes.values():
+            if b.location == 'gripper':
+                continue
+            lp = np.linalg.inv(mat_from_pose(b.pose.pose)) @ p     # TCP in the box's own frame
+            if abs(lp[0]) &lt;= b.size.x / 2 and abs(lp[1]) &lt;= b.size.y / 2 and abs(lp[2] - b.size.z / 2) &lt; tol:
+                return b.id
+        return None
+
+    def settle(self, box):
+        &quot;&quot;&quot;Mock gravity: drop straight down onto the highest thing below (surface or box).&quot;&quot;&quot;
+        T = mat_from_pose(box.pose.pose); x, y = T[0, 3], T[1, 3]
+        support = 0.0
+        for a in (PALLET, CONVEYOR):
+            if abs(x - a['x']) &lt;= a['sx'] / 2 and abs(y - a['y']) &lt;= a['sy'] / 2:
+                support = a['z']
+        for o in self.boxes.values():                                # axis-aligned footprint overlap
+            if o.id == box.id or o.location == 'gripper':
+                continue
+            To = mat_from_pose(o.pose.pose)
+            if abs(To[0, 3] - x) &lt; (o.size.x + box.size.x) / 2 and abs(To[1, 3] - y) &lt; (o.size.y + box.size.y) / 2:
+                support = max(support, To[2, 3] + o.size.z / 2)
+        T[2, 3] = support + box.size.z / 2
+        box.pose.pose = pose_from_mat(T)
+        box.location = self.location_of(box)
+
+    def location_of(self, box):
+        x, y = box.pose.pose.position.x, box.pose.pose.position.y
+        for name, a in (('pallet', PALLET), ('conveyor', CONVEYOR)):
+            if abs(x - a['x']) &lt;= a['sx'] / 2 and abs(y - a['y']) &lt;= a['sy'] / 2:
+                return name
+        return 'unknown'
+
+    # ---- 10 Hz: held box follows the TCP; publish truth for the mocks and RViz -------
+    def tick(self):
+        if self.held:
+            try:
+                T_world_tcp = mat_from_tf(self.buf.lookup_transform('world', 'tcp', rclpy.time.Time()).transform)
+                self.boxes[self.held].pose.pose = pose_from_mat(T_world_tcp @ self.T_tcp_box)
+            except TransformException:
+                pass
+        now = self.get_clock().now().to_msg()
+        arr = BoxArray(); arr.header.stamp, arr.header.frame_id = now, 'world'
+        markers = MarkerArray(); markers.markers.append(Marker(action=Marker.DELETEALL))
+        for i, b in enumerate(self.boxes.values()):
+            b.pose.header.stamp = now
+            arr.boxes.append(b)
+            m = Marker(type=Marker.CUBE, action=Marker.ADD, id=i, ns='boxes')
+            m.header.frame_id, m.header.stamp = 'world', now
+            m.pose, m.scale = b.pose.pose, b.size
+            m.color.r, m.color.g, m.color.b = SKU_COLORS.get(b.sku, (0.6, 0.6, 0.6)); m.color.a = 0.9
+            markers.markers.append(m)
+            t = TransformStamped(); t.header.stamp, t.header.frame_id, t.child_frame_id = now, 'world', f'box_{b.id}'
+            p = b.pose.pose.position
+            t.transform.translation = Vector3(x=p.x, y=p.y, z=p.z); t.transform.rotation = b.pose.pose.orientation
+            self.br.sendTransform(t)
+        self.pub_boxes.publish(arr); self.pub_markers.publish(markers)
+
+def main():
+    rclpy.init(); n = WorldModel()
+    ex = MultiThreadedExecutor(); ex.add_node(n); ex.spin()
+</code></pre>
+<h2 id="cell_simcell_simmock_gripperpy"><code>cell_sim/cell_sim/mock_gripper.py</code></h2>
+<pre><code class="language-python">import time, rclpy
+from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import Bool
+from std_srvs.srv import SetBool
+from cell_interfaces.srv import SetSuction
+
+class MockGripper(Node):
+    &quot;&quot;&quot;Vacuum ejector + vacuum switch: a response delay, then a signal that is False if nothing sealed.&quot;&quot;&quot;
+
+    def __init__(self):
+        super().__init__('mock_gripper')
+        self.declare_parameter('vacuum_delay_s', 0.2)
+        cb = ReentrantCallbackGroup()
+        self.world = self.create_client(SetBool, 'world/grip', callback_group=cb)
+        self.create_service(SetSuction, 'gripper/set_suction', self.handle, callback_group=cb)
+        self.vacuum = False
+        self.pub = self.create_publisher(Bool, 'gripper/vacuum', 10)
+        self.create_timer(0.1, lambda: self.pub.publish(Bool(data=self.vacuum)))
+
+    def handle(self, req, res):
+        time.sleep(self.get_parameter('vacuum_delay_s').value)     # ejector response time
+        r = self.world.call(SetBool.Request(data=req.on))         # blocking call: needs the multithreaded executor
+        self.vacuum = bool(req.on and r.success)
+        res.success, res.message = r.success, r.message
+        return res
+
+def main():
+    rclpy.init(); n = MockGripper()
+    ex = MultiThreadedExecutor(); ex.add_node(n); ex.spin()
+</code></pre>
+<h2 id="cell_simcell_simspawn_scenepy"><code>cell_sim/cell_sim/spawn_scene.py</code></h2>
+<pre><code class="language-python">import argparse, rclpy
+from rclpy.node import Node
+from std_srvs.srv import Trigger
+from geometry_msgs.msg import Vector3
+from cell_interfaces.msg import Box
+from cell_interfaces.srv import SpawnBox
+from cell_sim.geometry import trans, pose_from_mat
+
+SKUS = {'A': (0.30, 0.18, 0.15), 'B': (0.20, 0.20, 0.12), 'C': (0.40, 0.30, 0.20)}   # x, y, z [m]
+
+def single_sku(layers):            # 2 x 3 grid of SKU A per layer with 2 cm gaps, column stacked (Ch 12 interlocks)
+    return [('A', trans(x, y, 0.15 * L + 0.075))
+            for L in range(layers) for x in (-0.16, 0.16) for y in (-0.2, 0.0, 0.2)]
+
+def mixed():                       # three SKUs with gaps; two boxes sit on top of others
+    return [('C', trans(-0.2, -0.15, 0.10)), ('B', trans(-0.2, 0.15, 0.06)), ('A', trans(0.2, -0.2, 0.075)),
+            ('A', trans(0.2, 0.0, 0.075)), ('B', trans(0.2, 0.0, 0.21)), ('A', trans(-0.2, -0.15, 0.275))]
+
+def call(node, client, req):
+    fut = client.call_async(req); rclpy.spin_until_future_complete(node, fut); return fut.result()
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--scene', choices=['single_sku', 'mixed'], default='single_sku')
+    ap.add_argument('--layers', type=int, default=2)
+    args = ap.parse_args()
+    rclpy.init(); node = Node('spawn_scene')
+    reset, spawn = node.create_client(Trigger, 'world/reset'), node.create_client(SpawnBox, 'world/spawn_box')
+    reset.wait_for_service(); spawn.wait_for_service()
+    call(node, reset, Trigger.Request())
+    scene = single_sku(args.layers) if args.scene == 'single_sku' else mixed()
+    for n, (sku, T) in enumerate(scene):
+        b = Box(id=f'box_{n:03d}', sku=sku, size=Vector3(x=SKUS[sku][0], y=SKUS[sku][1], z=SKUS[sku][2]))
+        b.pose.header.frame_id = 'pallet_frame'; b.pose.pose = pose_from_mat(T)   # z = height above the deck
+        print(call(node, spawn, SpawnBox.Request(box=b)).message)
+    rclpy.shutdown()
+</code></pre>
+<p>Entry points: <code>world_model</code>, <code>mock_gripper</code>, <code>spawn_scene</code>. Build, then:</p>
+<pre><code class="language-bash">ros2 launch cell_moveit_config demo.launch.py          # robot, controllers, move_group, RViz
+ros2 run cell_sim world_model                          # terminal 2
+ros2 run cell_sim mock_gripper                         # terminal 3
+ros2 run cell_sim spawn_scene --scene single_sku --layers 2
+ros2 service call /world/get_boxes cell_interfaces/srv/GetBoxes &quot;{location: pallet}&quot;
+</code></pre>
+<p>In RViz add a <strong>MarkerArray</strong> display on <code>/world/markers</code> and save the config. Twelve orange boxes sit on the pallet in two layers.</p>
+<h2 id="first-pick-cell_motionsrcgrip_democpp">First pick: <code>cell_motion/src/grip_demo.cpp</code></h2>
+<p>This program reads the box pose from <code>world/get_boxes</code>. That is allowed <strong>only here</strong>, as a test of the twin; from Ch 10 on the pose comes from vision.</p>
+<pre><code class="language-cpp">#include &lt;cmath&gt;
+#include &lt;thread&gt;
+#include &lt;cell_interfaces/srv/get_boxes.hpp&gt;
+#include &lt;cell_interfaces/srv/set_suction.hpp&gt;
+#include &lt;cell_motion/robot.hpp&gt;
+
+using namespace cell_planning;
+using GetBoxes = cell_interfaces::srv::GetBoxes;
+using SetSuction = cell_interfaces::srv::SetSuction;
+
+static geometry_msgs::msg::PoseStamped stamped(const Isometry3d &amp; T, const std::string &amp; frame = &quot;world&quot;) {
+  geometry_msgs::msg::PoseStamped p; p.header.frame_id = frame; p.pose = poseFromMat(T); return p;
+}
+
+int main(int argc, char ** argv) {
+  rclcpp::init(argc, argv);
+  auto node = rclcpp::Node::make_shared(&quot;grip_demo&quot;, rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+  rclcpp::executors::MultiThreadedExecutor ex;
+  ex.add_node(node);
+  std::thread spinner([&amp;ex]() { ex.spin(); });
+  cell_motion::Robot robot(node);
+  auto get_boxes = node-&gt;create_client&lt;GetBoxes&gt;(&quot;world/get_boxes&quot;);
+  auto suction = node-&gt;create_client&lt;SetSuction&gt;(&quot;gripper/set_suction&quot;);
+  get_boxes-&gt;wait_for_service(); suction-&gt;wait_for_service();
+  auto setSuction = [&amp;](bool on) { auto r = std::make_shared&lt;SetSuction::Request&gt;(); r-&gt;on = on; return suction-&gt;async_send_request(r).get()-&gt;success; };
+
+  auto req = std::make_shared&lt;GetBoxes::Request&gt;(); req-&gt;location = &quot;pallet&quot;;
+  const auto boxes = get_boxes-&gt;async_send_request(req).get()-&gt;boxes;          // test-only shortcut
+  if (boxes.empty()) { RCLCPP_ERROR(node-&gt;get_logger(), &quot;no boxes on the pallet&quot;); rclcpp::shutdown(); spinner.join(); return 1; }
+  const auto &amp; box = boxes.front();
+  const Isometry3d T_grasp = topDownTcp(matFromPose(box.pose.pose), box.size.z);  // TCP on the top face, pad down
+  const Isometry3d T_above = T_grasp * trans(0, 0, -0.15);                         // 15 cm up (TCP z points down)
+  const Isometry3d T_drop = trans(-0.9, 0.0, 0.70 + box.size.z) * rotX(M_PI);      // pad at box-top height on the belt
+
+  bool ok = robot.goHome()
+    &amp;&amp; robot.moveTo(stamped(T_above)) &amp;&amp; robot.moveLinear(stamped(T_grasp))
+    &amp;&amp; setSuction(true)
+    &amp;&amp; robot.moveLinear(stamped(T_above))
+    &amp;&amp; robot.moveTo(stamped(T_drop * trans(0, 0, -0.15))) &amp;&amp; robot.moveLinear(stamped(T_drop));
+  setSuction(false);
+  ok = ok &amp;&amp; robot.moveLinear(stamped(T_drop * trans(0, 0, -0.15))) &amp;&amp; robot.goHome();
+  RCLCPP_INFO(node-&gt;get_logger(), ok ? &quot;done&quot; : &quot;a step failed&quot;);
+  rclcpp::shutdown();
+  spinner.join();
+  return ok ? 0 : 1;
+}
+</code></pre>
+<p>Add <code>grip_demo</code> next to <code>motion_demo</code> in <code>cell_motion/CMakeLists.txt</code> (same dependencies plus <code>cell_interfaces</code>).</p>
+<p>Watch the marker ride with the gripper, then settle on the conveyor at z = 0.70 + 0.075.</p>
+<p>Real cell: a physics engine or reality replaces <code>settle()</code> and <code>box_under()</code>; the vacuum switch replaces <code>gripper/vacuum</code>. Everything else in this chapter, including the delay before the switch answers, is what the real I/O looks like to the software.</p>
+<h2 id="checkpoint">Checkpoint</h2>
+<ul>
+<li>[ ] <code>spawn_scene</code> draws 12 boxes; <code>world/reset</code> clears them; the <code>box_000</code> TF frame shows in RViz</li>
+<li>[ ] Calling <code>gripper/set_suction {on: true}</code> with the robot at home returns <code>success: false</code>, message <code>no box under the pad</code>, and <code>/gripper/vacuum</code> stays false</li>
+<li>[ ] <code>grip_demo</code> moves <code>box_000</code> to the conveyor; <code>world/get_boxes {location: conveyor}</code> lists it</li>
+<li>[ ] You released a box above another box (edit <code>T_drop</code>) and it settled on top, not inside</li>
+</ul>
+<h2 id="questions">Questions</h2>
+<ol>
+<li>Why store every box in <code>world</code> inside the model, yet accept spawns in any frame?</li>
+<li><code>box_under</code> checks the TCP against the box's own frame. What breaks if the box is rotated 30° and you used an axis-aligned test instead?</li>
+</ol>
+<p>Answers: <a href="appendix.html">Appendix</a></p><footer><a class="prev" href="ch07.html">&larr; Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a class="next" href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5) &rarr;</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>

@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch 13 — Depalletizing end-to-end: the task executive (week 8)</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html" class="current">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="ch-13-depalletizing-end-to-end-the-task-executive-week-8">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</h1>
+<p>Goal: an <code>executive</code> node that runs a whole depalletizing job as a <code>RunJob</code> action: capture, detect, choose, keep the planning scene honest, pick and place, repeat, recover. One launch file starts the entire cell.</p>
+<h2 id="the-loop">The loop</h2>
+<p><img src="img/executive-state-machine.svg" alt="Depalletizing is a loop: capture, detect, pick, and recover when a stage fails" style="max-width:100%"></p>
+<p>Every transition is a line of code in <code>execute()</code> below; the executive is an explicit state machine, so the log of its states is the story of the job. Ch 17 shows the same logic as a behavior tree.</p>
+<h2 id="what-the-executive-knows">What the executive knows</h2>
+<p>The executive holds <strong>beliefs</strong> and nothing else: the last detection frame, a SKU table, and its own record of what it placed where. In this chapter it drops boxes into three slots on the still conveyor and stacks two per slot (one layer of six). Ch 14 replaces the slots with a moving belt.</p>
+<pre><code class="language-cpp">// cell_planning/include/cell_planning/skus.hpp   (what a WMS would provide)
+#pragma once
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+#include &lt;map&gt;
+#include &lt;string&gt;
+#include &lt;utility&gt;
+#include &lt;cell_planning/grasps.hpp&gt;      // BoxSize
+
+namespace cell_planning {
+
+inline const std::map&lt;std::string, BoxSize&gt; SKUS{{&quot;A&quot;, {0.30, 0.18, 0.15}}, {&quot;B&quot;, {0.20, 0.20, 0.12}}, {&quot;C&quot;, {0.40, 0.30, 0.20}}};
+
+/// Footprint lookup (the detector gives the long side first). Empty name = no match: measured footprint, default height.
+inline std::pair&lt;std::string, BoxSize&gt; matchSku(double sx, double sy, double tol = 0.03) {
+  for (const auto &amp; [name, b] : SKUS)
+    if (std::abs(sx - std::max(b.x, b.y)) &lt;= tol &amp;&amp; std::abs(sy - std::min(b.x, b.y)) &lt;= tol) return {name, b};
+  return {&quot;&quot;, BoxSize{sx, sy, 0.15}};
+}
+
+}  // namespace cell_planning
+</code></pre>
+<h2 id="planning-scene-sync-cell_executiveincludecell_executivescenehpp">Planning scene sync: <code>cell_executive/include/cell_executive/scene.hpp</code></h2>
+<pre><code class="language-cpp">#pragma once
+#include &lt;set&gt;
+#include &lt;string&gt;
+#include &lt;rclcpp/rclcpp.hpp&gt;
+#include &lt;moveit_msgs/msg/collision_object.hpp&gt;
+#include &lt;shape_msgs/msg/solid_primitive.hpp&gt;
+#include &lt;vision_msgs/msg/detection3_d_array.hpp&gt;
+#include &lt;cell_planning/geometry.hpp&gt;
+#include &lt;cell_planning/grasps.hpp&gt;
+
+namespace cell_executive {
+
+/// Keeps move_group's world in sync with what the executive believes, via the /collision_object topic.
+class Scene {
+public:
+  explicit Scene(rclcpp::Node &amp; node, std::string frame = &quot;pallet_frame&quot;) : node_(node), frame_(std::move(frame)) {
+    pub_ = node.create_publisher&lt;moveit_msgs::msg::CollisionObject&gt;(&quot;collision_object&quot;, 10);
+  }
+
+  void add(const std::string &amp; id, const Eigen::Isometry3d &amp; T, const cell_planning::BoxSize &amp; s, const std::string &amp; frame = &quot;&quot;) {
+    auto co = msg(id, moveit_msgs::msg::CollisionObject::ADD, frame);
+    shape_msgs::msg::SolidPrimitive box;
+    box.type = box.BOX;
+    box.dimensions = {s.x, s.y, s.z};
+    co.primitives.push_back(box);
+    co.primitive_poses.push_back(cell_planning::poseFromMat(T));
+    pub_-&gt;publish(co);
+    ids_.insert(id);
+  }
+
+  void remove(const std::string &amp; id) { pub_-&gt;publish(msg(id, moveit_msgs::msg::CollisionObject::REMOVE)); ids_.erase(id); }
+
+  void clear() { for (const auto &amp; id : std::set&lt;std::string&gt;(ids_)) remove(id); }
+
+  /// One box per detection plus a solid envelope for everything below the top layer.
+  template &lt;typename SizeOf&gt;
+  void sync(const vision_msgs::msg::Detection3DArray &amp; dets, SizeOf sizeOf) {
+    for (const auto &amp; id : std::set&lt;std::string&gt;(ids_))
+      if (id.rfind(&quot;det_&quot;, 0) == 0 || id == &quot;stack&quot;) remove(id);
+    double z_top = 0.0, tallest = 0.0;
+    for (const auto &amp; d : dets.detections) {
+      const cell_planning::BoxSize s = sizeOf(d);
+      const double top = d.bbox.center.position.z + d.bbox.size.z / 2;
+      Eigen::Isometry3d T = cell_planning::matFromPose(d.bbox.center);
+      T.translation().z() = top - s.z / 2;                               // re-center with the SKU height
+      add(d.id, T, s);
+      z_top = std::max(z_top, top);
+      tallest = std::max(tallest, s.z);
+    }
+    const double below = z_top - tallest;
+    if (below &gt; 0.01)                                                    // we cannot see under the top layer
+      add(&quot;stack&quot;, cell_planning::trans(0.0, 0.0, below / 2), {0.8, 0.6, below});
+  }
+
+private:
+  moveit_msgs::msg::CollisionObject msg(const std::string &amp; id, int8_t op, const std::string &amp; frame = &quot;&quot;) {
+    moveit_msgs::msg::CollisionObject co;
+    co.id = id;
+    co.operation = op;
+    co.header.frame_id = frame.empty() ? frame_ : frame;
+    co.header.stamp = node_.now();
+    return co;
+  }
+
+  rclcpp::Node &amp; node_;
+  std::string frame_;
+  rclcpp::Publisher&lt;moveit_msgs::msg::CollisionObject&gt;::SharedPtr pub_;
+  std::set&lt;std::string&gt; ids_;
+};
+
+}  // namespace cell_executive
+</code></pre>
+<h2 id="cell_executivesrcexecutivecpp"><code>cell_executive/src/executive.cpp</code></h2>
+<pre><code class="language-cpp">#include &lt;algorithm&gt;
+#include &lt;chrono&gt;
+#include &lt;map&gt;
+#include &lt;mutex&gt;
+#include &lt;optional&gt;
+#include &lt;string&gt;
+#include &lt;thread&gt;
+#include &lt;rclcpp/rclcpp.hpp&gt;
+#include &lt;rclcpp_action/rclcpp_action.hpp&gt;
+#include &lt;std_srvs/srv/trigger.hpp&gt;
+#include &lt;vision_msgs/msg/detection3_d_array.hpp&gt;
+#include &lt;tf2_ros/buffer.h&gt;
+#include &lt;tf2_ros/transform_listener.h&gt;
+#include &lt;cell_interfaces/action/pick_place.hpp&gt;
+#include &lt;cell_interfaces/action/run_job.hpp&gt;
+#include &lt;cell_planning/geometry.hpp&gt;
+#include &lt;cell_planning/grasps.hpp&gt;
+#include &lt;cell_planning/skus.hpp&gt;
+#include &lt;cell_executive/scene.hpp&gt;
+
+using namespace std::chrono_literals;
+using namespace cell_planning;
+using PickPlace = cell_interfaces::action::PickPlace;
+using RunJob = cell_interfaces::action::RunJob;
+using JobHandle = rclcpp_action::ServerGoalHandle&lt;RunJob&gt;;
+using Dets = vision_msgs::msg::Detection3DArray;
+
+static const Isometry3d CONVEYOR_TOP = trans(-0.9, 0.0, 0.70);     // belt surface at the photo-eye, world frame
+static const std::vector&lt;double&gt; DROP_SLOTS = {0.0, 0.4, -0.4};     // y offsets along the belt; Ch 14 deletes these
+
+static geometry_msgs::msg::PoseStamped stamped(const Isometry3d &amp; T, const std::string &amp; frame = &quot;world&quot;) {
+  geometry_msgs::msg::PoseStamped p; p.header.frame_id = frame; p.pose = poseFromMat(T); return p;
+}
+
+/// Beliefs only: the last detection frame, the SKU table, and what it placed where. It never reads world_model.
+class Executive : public rclcpp::Node {
+public:
+  Executive() : Node(&quot;executive&quot;), buf_(get_clock()), listener_(buf_), scene_(*this) {
+    cb_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    capture_ = create_client&lt;std_srvs::srv::Trigger&gt;(&quot;camera/capture&quot;, rmw_qos_profile_services_default, cb_);
+    pick_place_ = rclcpp_action::create_client&lt;PickPlace&gt;(this, &quot;pick_place&quot;, cb_);
+    rclcpp::SubscriptionOptions so; so.callback_group = cb_;
+    sub_ = create_subscription&lt;Dets&gt;(&quot;detections&quot;, 10, [this](Dets::ConstSharedPtr m) { std::lock_guard&lt;std::mutex&gt; l(mtx_); frame_ = m; }, so);
+    server_ = rclcpp_action::create_server&lt;RunJob&gt;(
+      this, &quot;run_job&quot;,
+      [](const rclcpp_action::GoalUUID &amp;, RunJob::Goal::ConstSharedPtr) { return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE; },
+      [](std::shared_ptr&lt;JobHandle&gt;) { return rclcpp_action::CancelResponse::ACCEPT; },
+      [this](std::shared_ptr&lt;JobHandle&gt; gh) { std::thread([this, gh]() { execute(gh); }).detach(); },
+      rcl_action_server_get_default_options(), cb_);
+    for (double s : DROP_SLOTS) placed_[s] = 0;                        // belief: boxes per slot
+  }
+
+private:
+  // ---- waiting from the job thread: the executor keeps serving callbacks meanwhile ----
+  bool capture() {
+    auto fut = capture_-&gt;async_send_request(std::make_shared&lt;std_srvs::srv::Trigger::Request&gt;());
+    return fut.wait_for(15s) == std::future_status::ready;
+  }
+  void clearFrame() { std::lock_guard&lt;std::mutex&gt; l(mtx_); frame_.reset(); }
+  std::optional&lt;Dets&gt; waitFrame(std::chrono::milliseconds timeout) {     // checks at least once, even with 0 ms
+    const auto t0 = std::chrono::steady_clock::now();
+    do {
+      { std::lock_guard&lt;std::mutex&gt; l(mtx_); if (frame_) return *frame_; }
+      std::this_thread::sleep_for(50ms);
+    } while (std::chrono::steady_clock::now() - t0 &lt; timeout);
+    return std::nullopt;
+  }
+  /// Sends a PickPlace goal and waits for it. Returns (success, message).
+  std::pair&lt;bool, std::string&gt; runPick(const PickPlace::Goal &amp; goal) {
+    rclcpp_action::Client&lt;PickPlace&gt;::SendGoalOptions opts;
+    opts.feedback_callback = [this](auto, PickPlace::Feedback::ConstSharedPtr f) { onStage(*f); };
+    auto gh_fut = pick_place_-&gt;async_send_goal(goal, opts);
+    if (gh_fut.wait_for(10s) != std::future_status::ready || !gh_fut.get()) return {false, &quot;pick_place rejected the goal&quot;};
+    auto res_fut = pick_place_-&gt;async_get_result(gh_fut.get());
+    if (res_fut.wait_for(180s) != std::future_status::ready) return {false, &quot;pick_place timeout&quot;};
+    const auto r = res_fut.get();
+    return {r.result &amp;&amp; r.result-&gt;success, r.result ? r.result-&gt;message : &quot;no result&quot;};
+  }
+  void onStage(const PickPlace::Feedback &amp; f) { RCLCPP_INFO(get_logger(), &quot;   %s&quot;, f.stage.c_str()); }
+
+  // ---- the loop ----
+  void execute(std::shared_ptr&lt;JobHandle&gt; gh) {
+    auto fb = std::make_shared&lt;RunJob::Feedback&gt;();
+    auto res = std::make_shared&lt;RunJob::Result&gt;();
+    const auto &amp; req = *gh-&gt;get_goal();
+    std::string state = &quot;CAPTURE&quot;;
+    int moved = 0, retries = 0;
+    Dets dets;
+    std::optional&lt;PickPlace::Goal&gt; goal;
+    scene_.clear();
+    while (true) {
+      fb-&gt;state = state; fb-&gt;boxes_moved = moved; gh-&gt;publish_feedback(fb);
+      RCLCPP_INFO(get_logger(), &quot;[%d] %s&quot;, moved, state.c_str());
+      if (gh-&gt;is_canceling()) { res-&gt;boxes_moved = moved; res-&gt;message = &quot;cancelled&quot;; gh-&gt;canceled(res); return; }
+
+      if (state == &quot;CAPTURE&quot;) {
+        clearFrame();
+        if (!capture()) { last_error_ = &quot;camera timeout&quot;; state = &quot;RECOVER&quot;; continue; }
+        state = &quot;DETECT&quot;;
+      } else if (state == &quot;DETECT&quot;) {
+        const auto f = waitFrame(2s);
+        if (!f) { last_error_ = &quot;no detections&quot;; state = &quot;RECOVER&quot;; continue; }
+        dets = *f;
+        if (dets.detections.empty() || (req.max_boxes &gt;= 0 &amp;&amp; moved &gt;= req.max_boxes)) { state = &quot;DONE&quot;; continue; }
+        state = &quot;SELECT&quot;;
+      } else if (state == &quot;SELECT&quot;) {
+        goal = planPick(dets);
+        state = goal ? &quot;PICK_PLACE&quot; : &quot;DONE&quot;;
+      } else if (state == &quot;PICK_PLACE&quot;) {
+        const auto [ok, msg] = runPick(*goal);
+        if (ok) { ++moved; retries = 0; recordPlace(*goal); state = &quot;CAPTURE&quot;; }
+        else { last_error_ = msg; state = &quot;RECOVER&quot;; }
+      } else if (state == &quot;RECOVER&quot;) {
+        ++retries;
+        RCLCPP_ERROR(get_logger(), &quot;recover (%d/3): %s&quot;, retries, last_error_.c_str());
+        if (last_error_.find(&quot;still holding&quot;) != std::string::npos || retries &gt; 3) { state = &quot;FAILED&quot;; continue; }
+        state = &quot;CAPTURE&quot;;
+      } else {                                                          // DONE or FAILED
+        res-&gt;success = state == &quot;DONE&quot;; res-&gt;boxes_moved = moved; res-&gt;message = state;
+        if (res-&gt;success) gh-&gt;succeed(res); else gh-&gt;abort(res);
+        return;
+      }
+    }
+  }
+
+  /// Highest box first; SKU height overrides the detector's; refuse risky grasps.
+  std::optional&lt;PickPlace::Goal&gt; planPick(const Dets &amp; dets) {
+    auto top = [](const vision_msgs::msg::Detection3D &amp; d) { return d.bbox.center.position.z + d.bbox.size.z / 2; };
+    const auto &amp; d = *std::max_element(dets.detections.begin(), dets.detections.end(),
+                                       [&amp;](const auto &amp; a, const auto &amp; b) { return top(a) &lt; top(b); });   // highest top face
+    const auto [sku, size] = matchSku(d.bbox.size.x, d.bbox.size.y);
+    auto sizeOf = [](const vision_msgs::msg::Detection3D &amp; o) { return matchSku(o.bbox.size.x, o.bbox.size.y).second; };
+    Isometry3d T_box = matFromPose(d.bbox.center);
+    T_box.translation().z() = top(d) - size.z / 2;
+    std::vector&lt;Neighbor&gt; others;
+    for (const auto &amp; o : dets.detections) if (o.id != d.id) others.push_back({matFromPose(o.bbox.center), sizeOf(o)});
+    const auto [risk, T_pick] = bestGrasp(T_box, size, others);
+    if (risk &gt; 0.1) { RCLCPP_WARN(get_logger(), &quot;%s: double-pick risk %.2f, skipping&quot;, d.id.c_str(), risk); return std::nullopt; }
+    const double slot = std::min_element(placed_.begin(), placed_.end(), [](const auto &amp; a, const auto &amp; b) { return a.second &lt; b.second; })-&gt;first;
+    if (placed_[slot] &gt;= 2) { RCLCPP_WARN(get_logger(), &quot;drop slots full&quot;); return std::nullopt; }
+    scene_.sync(dets, sizeOf);
+    const Isometry3d T_wp = tf2::transformToEigen(buf_.lookupTransform(&quot;world&quot;, &quot;pallet_frame&quot;, tf2::TimePointZero, tf2::durationFromSec(1.0)));
+    const Isometry3d T_place = CONVEYOR_TOP * trans(0.0, slot, placed_[slot] * size.z + size.z) * rotX(M_PI);
+    PickPlace::Goal g;
+    g.box_id = d.id;
+    g.pick_pose = stamped(T_wp * T_pick);
+    g.place_pose = stamped(T_place);
+    g.box_size.x = size.x; g.box_size.y = size.y; g.box_size.z = size.z;
+    RCLCPP_INFO(get_logger(), &quot;%s: sku '%s' risk %.2f -&gt; slot y=%.1f&quot;, d.id.c_str(), sku.c_str(), risk, slot);
+    return g;
+  }
+
+  /// Belief update: the box now sits in its slot; the planner must avoid it.
+  void recordPlace(const PickPlace::Goal &amp; g) {
+    const double slot = std::round(g.place_pose.pose.position.y * 100) / 100;
+    placed_[slot] += 1;
+    const Isometry3d T = matFromPose(g.place_pose.pose) * trans(0.0, 0.0, g.box_size.z / 2);   // from TCP at the top to the center
+    scene_.add(&quot;placed_&quot; + std::to_string(slot) + &quot;_&quot; + std::to_string(placed_[slot]), T,
+               {g.box_size.x, g.box_size.y, g.box_size.z}, &quot;world&quot;);
+  }
+
+  rclcpp::CallbackGroup::SharedPtr cb_;
+  rclcpp::Client&lt;std_srvs::srv::Trigger&gt;::SharedPtr capture_;
+  rclcpp_action::Client&lt;PickPlace&gt;::SharedPtr pick_place_;
+  rclcpp::Subscription&lt;Dets&gt;::SharedPtr sub_;
+  rclcpp_action::Server&lt;RunJob&gt;::SharedPtr server_;
+  tf2_ros::Buffer buf_;
+  tf2_ros::TransformListener listener_;
+  cell_executive::Scene scene_;
+  std::mutex mtx_;
+  Dets::ConstSharedPtr frame_;
+  std::map&lt;double, int&gt; placed_;
+  std::string last_error_;
+};
+
+int main(int argc, char ** argv) {
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared&lt;Executive&gt;();
+  rclcpp::executors::MultiThreadedExecutor ex(rclcpp::ExecutorOptions(), 4);
+  ex.add_node(node);
+  ex.spin();
+  rclcpp::shutdown();
+}
+</code></pre>
+<pre><code class="language-cmake"># cell_executive/CMakeLists.txt
+cmake_minimum_required(VERSION 3.8)
+project(cell_executive)
+set(CMAKE_CXX_STANDARD 17)
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(vision_msgs REQUIRED)
+find_package(moveit_msgs REQUIRED)
+find_package(shape_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
+find_package(cell_interfaces REQUIRED)
+find_package(cell_planning REQUIRED)
+
+add_executable(executive src/executive.cpp)
+target_include_directories(executive PUBLIC include)
+ament_target_dependencies(executive rclcpp rclcpp_action std_srvs vision_msgs moveit_msgs shape_msgs tf2_ros tf2_eigen cell_interfaces)
+target_link_libraries(executive cell_planning::cell_planning)
+
+install(TARGETS executive DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY include/ DESTINATION include)
+ament_package()
+</code></pre>
+<p>The TCP z axis points into the box, so <code>place_pose * trans(0, 0, +h/2)</code> is the box center: the same sign convention as <code>offset()</code> in Ch 11. The job runs in its own thread (<code>execute</code> is started from the accept callback), so every wait in it is a plain <code>future.wait_for</code> or a sleep while the executor's four threads keep serving feedback, the detection subscription and the action protocol.</p>
+<h2 id="one-launch-file-for-the-cell-cell_bringuplaunchcelllaunchpy">One launch file for the cell: <code>cell_bringup/launch/cell.launch.py</code></h2>
+<pre><code class="language-python">from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+def include(pkg, name, **args):
+    return IncludeLaunchDescription(PythonLaunchDescriptionSource([FindPackageShare(pkg), '/launch/', name]),
+                                    launch_arguments=args.items())
+
+def generate_launch_description():
+    return LaunchDescription([
+        include('cell_moveit_config', 'demo.launch.py'),          # robot, controllers, move_group, RViz
+        include('cell_sim', 'twin.launch.py'),                    # world_model, mock_gripper, mock_camera
+        Node(package='cell_perception', executable='box_detector', output='screen'),
+        Node(package='cell_motion', executable='pick_place_server', output='screen'),
+        Node(package='cell_executive', executable='executive', output='screen'),
+    ])
+</code></pre>
+<p>Set <code>continuous_hz: 0.0</code> for the camera in <code>twin.launch.py</code> now: the executive triggers captures itself, like a real cell.</p>
+<h2 id="run-a-job">Run a job</h2>
+<pre><code class="language-bash">ros2 launch cell_bringup cell.launch.py
+ros2 run cell_sim spawn_scene --scene single_sku --layers 1
+ros2 action send_goal /run_job cell_interfaces/action/RunJob &quot;{mode: depalletize, strategy: single_sku}&quot; --feedback
+</code></pre>
+<p>Feedback walks through <code>CAPTURE, DETECT, SELECT, PICK_PLACE</code> six times, then <code>DONE</code> with <code>boxes_moved: 6</code>. In RViz the planning scene shows green detection boxes, the envelope under them (none for one layer), the attached box during transit and the placed boxes growing in three stacks on the belt.</p>
+<p>Real cell: this node is the "task layer" of any palletizing controller. In a Mujin-style system the same loop exists, with the planning scene and the belief state inside the controller's own environment model, and a far richer recovery vocabulary. The interfaces around it (capture, detections, pick/place, I/O) are what you have just built.</p>
+<h2 id="checkpoint">Checkpoint</h2>
+<ul>
+<li>[ ] A one-layer job finishes with <code>boxes_moved: 6</code> and the pallet is empty in the mock camera's next cloud</li>
+<li>[ ] Cancelling the goal (Ctrl-C on <code>send_goal</code>) stops after the current pick; the robot is not left mid-motion</li>
+<li>[ ] Stop <code>mock_gripper</code> mid-job: the executive reports <code>no vacuum</code>, retries three times, then returns <code>FAILED</code></li>
+<li>[ ] Spawn two layers: the second job call reports <code>drop slots full</code> after the first six; you can explain why the executive, not the world model, knows that</li>
+<li>[ ] You added a <code>'stack'</code> envelope check: with two layers the planner refuses a path that passes through the lower layer (set a deliberately low approach distance to provoke it)</li>
+</ul>
+<h2 id="questions">Questions</h2>
+<ol>
+<li>Why does <code>planPick</code> re-center the box with the SKU height instead of trusting <code>bbox.size.z</code>?</li>
+<li>The executive calls services and actions from inside its own action callback. Which two Ch 1 facts make that safe?</li>
+</ol>
+<p>Answers: <a href="appendix.html">Appendix</a></p>
+<h2 id="go-deeper-capture-while-the-robot-carries-the-box">Go deeper: capture while the robot carries the box</h2>
+<p>The loop above captures only after RETREAT, so the camera and the robot take turns. Camera vendors recommend the opposite: trigger the capture as soon as the arm has lifted the box clear of the camera's view, so the next detection is ready when the place finishes (<a href="https://support.zivid.com/en/latest/camera/academy/applications/depalletization/optimize-robot-cycle-times.html">Zivid, optimizing robot cycle times</a>). In this cell the mock camera never sees the arm, so the change is a few lines:</p>
+<pre><code class="language-cpp">  // in the PickPlace feedback callback: the pallet is free once the box is lifted
+  void onStage(const PickPlace::Feedback &amp; f) {
+    RCLCPP_INFO(get_logger(), &quot;   %s&quot;, f.stage.c_str());
+    if (f.stage == &quot;TRANSIT&quot; &amp;&amp; mode_ == &quot;depalletize&quot;) {     // mode_: a member set at the start of execute()
+      clearFrame();
+      capture_-&gt;async_send_request(std::make_shared&lt;std_srvs::srv::Trigger::Request&gt;());
+    }
+  }
+  // in PICK_PLACE, on success (depalletize):
+  state = waitFrame(0ms) ? &quot;DETECT&quot; : &quot;CAPTURE&quot;;
+</code></pre>
+<p>Measure seconds per box before and after; on a real cell this is worth about one capture-and-detect time per pick, which is often 0.5–1 s.</p>
+<p>Also worth knowing: MoveIt's <a href="https://github.com/ros-planning/moveit2_tutorials/blob/main/doc/examples/examples.rst">perception pipeline</a> can build an octomap collision model straight from <code>/camera/points</code>, which replaces the hand-made <code>stack</code> envelope with the true shape of everything the camera sees. It costs planning time and needs a camera that also sees the sides of the stack, so this tutorial keeps the envelope.</p><footer><a class="prev" href="ch12.html">&larr; Ch 12 — Single-SKU pallet patterns (week 8)</a><a class="next" href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9) &rarr;</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>

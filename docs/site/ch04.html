@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch 4 — TF2: the frames of a robot cell (week 3)</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html" class="current">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="ch-4-tf2-the-frames-of-a-robot-cell-week-3">Ch 4 — TF2: the frames of a robot cell (week 3)</h1>
+<p>Goal: move poses between <code>world</code>, <code>pallet_frame</code>, <code>camera_optical_frame</code> and <code>tcp</code> without guessing signs. Every bug in vision-guided picking that is "off by a few centimeters in a strange direction" is a frame bug.</p>
+<h2 id="frames-in-this-cell">Frames in this cell</h2>
+<table>
+<thead>
+<tr>
+<th>Frame</th>
+<th>Parent</th>
+<th>Moves?</th>
+<th>Published by</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>world</code></td>
+<td>—</td>
+<td>no</td>
+<td>—</td>
+<td>everything is ultimately expressed here</td>
+</tr>
+<tr>
+<td><code>base_link</code></td>
+<td><code>world</code></td>
+<td>no</td>
+<td>robot_state_publisher (URDF)</td>
+<td>MoveIt planning frame</td>
+</tr>
+<tr>
+<td><code>tool0</code> → <code>tcp</code></td>
+<td>wrist_3</td>
+<td><strong>yes</strong></td>
+<td>robot_state_publisher from <code>/joint_states</code></td>
+<td>pick and place poses</td>
+</tr>
+<tr>
+<td><code>pallet_frame</code></td>
+<td><code>world</code></td>
+<td>no</td>
+<td>URDF</td>
+<td>box positions as (x, y, z above deck)</td>
+</tr>
+<tr>
+<td><code>conveyor_frame</code></td>
+<td><code>world</code></td>
+<td>no</td>
+<td>URDF</td>
+<td>pick/drop point on the belt</td>
+</tr>
+<tr>
+<td><code>camera_optical_frame</code></td>
+<td><code>camera_link</code></td>
+<td>no</td>
+<td>URDF</td>
+<td>point cloud data lives here</td>
+</tr>
+<tr>
+<td><code>box_&lt;id&gt;</code></td>
+<td><code>pallet_frame</code> / <code>conveyor_frame</code></td>
+<td>yes</td>
+<td>world_model (Ch 8)</td>
+<td>debugging, RViz</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-one-rule">The one rule</h2>
+<p><code>lookupTransform(target, source, time)</code> returns the pose of <code>source</code>'s origin expressed in <code>target</code>. Applying it to a point converts the point <strong>from</strong> <code>source</code> <strong>to</strong> <code>target</code> coordinates.</p>
+<pre><code class="language-text">T_world_tcp = lookupTransform('world', 'tcp')      # where is the TCP, in world
+p_world     = T_world_cam · p_cam                   # a point seen by the camera, in world
+T_pallet_box = inv(T_world_pallet) · T_world_box    # chain by multiplication
+</code></pre>
+<p>Time: <code>tf2::TimePointZero</code> means "latest available". A specific stamp fails with <em>extrapolation into the future</em> if the listener has not received that transform yet; pass a timeout (<code>tf2::durationFromSec(0.5)</code>) to wait.</p>
+<h2 id="geometry-helpers-in-c-cell_planningincludecell_planninggeometryhpp">Geometry helpers in C++: <code>cell_planning/include/cell_planning/geometry.hpp</code></h2>
+<p>Create <code>cell_planning</code> now as a header-only <code>ament_cmake</code> library. It holds math with no node code, so GoogleTest can test it without ROS running. Poses are <code>Eigen::Isometry3d</code> (a 4 × 4 rigid transform); <code>tf2_eigen</code> converts to and from the message types.</p>
+<pre><code class="language-bash">cd ~/pal_ws/src &amp;&amp; ros2 pkg create --build-type ament_cmake cell_planning --dependencies geometry_msgs tf2_eigen
+mkdir -p cell_planning/include/cell_planning cell_planning/test
+</code></pre>
+<pre><code class="language-cpp">#pragma once
+#include &lt;cmath&gt;
+#include &lt;Eigen/Geometry&gt;
+#include &lt;geometry_msgs/msg/pose.hpp&gt;
+#include &lt;geometry_msgs/msg/transform.hpp&gt;
+#include &lt;tf2_eigen/tf2_eigen.hpp&gt;
+
+namespace cell_planning {
+
+using Eigen::Isometry3d;
+
+inline Isometry3d matFromPose(const geometry_msgs::msg::Pose &amp; p) { Isometry3d T; tf2::fromMsg(p, T); return T; }
+inline Isometry3d matFromTf(const geometry_msgs::msg::Transform &amp; t) { return tf2::transformToEigen(t); }
+inline geometry_msgs::msg::Pose poseFromMat(const Isometry3d &amp; T) { return tf2::toMsg(T); }
+
+inline Isometry3d trans(double x = 0.0, double y = 0.0, double z = 0.0) { return Isometry3d(Eigen::Translation3d(x, y, z)); }
+inline Isometry3d rotX(double a) { return Isometry3d(Eigen::AngleAxisd(a, Eigen::Vector3d::UnitX())); }
+inline Isometry3d rotZ(double a) { return Isometry3d(Eigen::AngleAxisd(a, Eigen::Vector3d::UnitZ())); }
+inline double yawOf(const Isometry3d &amp; T) { return std::atan2(T(1, 0), T(0, 0)); }
+
+/// TCP pose for a suction grasp: at the box's top-face center, TCP z pointing into the box.
+/// tcp z points out of the pad (Ch 3), so flip the box frame by pi about x.
+inline Isometry3d topDownTcp(const Isometry3d &amp; T_frame_box, double size_z) {
+  return T_frame_box * trans(0.0, 0.0, size_z / 2) * rotX(M_PI);
+}
+
+}  // namespace cell_planning
+</code></pre>
+<pre><code class="language-cpp">// cell_planning/test/test_geometry.cpp
+#include &lt;gtest/gtest.h&gt;
+#include &lt;cell_planning/geometry.hpp&gt;
+
+using namespace cell_planning;
+
+TEST(Geometry, TopDownTcpPointsDown) {
+  const Isometry3d T_box = trans(0.2, 0.1, 0.075) * rotZ(0.5);
+  const Isometry3d T_tcp = topDownTcp(T_box, 0.15);
+  EXPECT_TRUE(T_tcp.translation().isApprox(Eigen::Vector3d(0.2, 0.1, 0.15)));     // at the top face
+  EXPECT_TRUE(T_tcp.linear().col(2).isApprox(Eigen::Vector3d(0, 0, -1)));         // z axis points down
+  EXPECT_TRUE(T_tcp.linear().col(0).isApprox(T_box.linear().col(0)));             // x follows the box yaw
+}
+
+TEST(Geometry, PoseRoundTrip) {                                                      // Ch 4 checkpoint
+  const Isometry3d T = trans(0.3, -0.2, 0.5) * rotX(0.3) * rotZ(1.2);
+  EXPECT_TRUE(matFromPose(poseFromMat(T)).isApprox(T, 1e-9));
+}
+</code></pre>
+<pre><code class="language-cmake"># cell_planning/CMakeLists.txt
+cmake_minimum_required(VERSION 3.8)
+project(cell_planning)
+set(CMAKE_CXX_STANDARD 17)
+
+find_package(ament_cmake REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2_eigen REQUIRED)
+
+add_library(cell_planning INTERFACE)                      # header-only
+target_include_directories(cell_planning INTERFACE
+  $&lt;BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include&gt; $&lt;INSTALL_INTERFACE:include&gt;)
+target_link_libraries(cell_planning INTERFACE Eigen3::Eigen ${geometry_msgs_TARGETS} tf2_eigen::tf2_eigen)
+
+install(DIRECTORY include/ DESTINATION include)
+install(TARGETS cell_planning EXPORT cell_planning_targets)
+ament_export_targets(cell_planning_targets HAS_LIBRARY_TARGET)
+ament_export_dependencies(Eigen3 geometry_msgs tf2_eigen)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_geometry test/test_geometry.cpp)
+  target_link_libraries(test_geometry cell_planning)
+endif()
+ament_package()
+</code></pre>
+<pre><code class="language-bash">cd ~/pal_ws &amp;&amp; colcon build --packages-select cell_planning
+colcon test --packages-select cell_planning &amp;&amp; colcon test-result --verbose
+</code></pre>
+<h2 id="listening-and-broadcasting-in-a-node-ros2_basicssrctf_democpp">Listening and broadcasting in a node: <code>ros2_basics/src/tf_demo.cpp</code></h2>
+<pre><code class="language-cpp">#include &lt;algorithm&gt;
+#include &lt;chrono&gt;
+#include &lt;rclcpp/rclcpp.hpp&gt;
+#include &lt;tf2_ros/buffer.h&gt;
+#include &lt;tf2_ros/transform_listener.h&gt;
+#include &lt;tf2_ros/transform_broadcaster.h&gt;
+#include &lt;tf2_ros/static_transform_broadcaster.h&gt;
+#include &lt;geometry_msgs/msg/transform_stamped.hpp&gt;
+
+class TfDemo : public rclcpp::Node {
+public:
+  TfDemo() : Node(&quot;tf_demo&quot;), buf_(get_clock()), listener_(buf_), static_br_(this), br_(this) {
+    geometry_msgs::msg::TransformStamped t;                 // a box that never moves: static
+    t.header.stamp = now();
+    t.header.frame_id = &quot;pallet_frame&quot;;
+    t.child_frame_id = &quot;box_1&quot;;
+    t.transform.translation.x = -0.25; t.transform.translation.y = 0.15; t.transform.translation.z = 0.075;
+    t.transform.rotation.w = 1.0;
+    static_br_.sendTransform(t);
+
+    belt_timer_ = create_wall_timer(std::chrono::milliseconds(50), [this]() { beltTick(); });   // dynamic, 20 Hz
+    report_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() { report(); });
+  }
+
+private:
+  void beltTick() {
+    y_ = std::min(y_ + 0.01, 0.0);                          // 0.2 m/s, stops at the photo-eye
+    geometry_msgs::msg::TransformStamped t;
+    t.header.stamp = now();
+    t.header.frame_id = &quot;conveyor_frame&quot;;
+    t.child_frame_id = &quot;box_belt&quot;;
+    t.transform.translation.y = y_; t.transform.translation.z = 0.075;
+    t.transform.rotation.w = 1.0;
+    br_.sendTransform(t);
+  }
+  void report() {
+    try {
+      const auto tf = buf_.lookupTransform(&quot;pallet_frame&quot;, &quot;tcp&quot;, tf2::TimePointZero, tf2::durationFromSec(0.5));
+      const auto &amp; p = tf.transform.translation;
+      RCLCPP_INFO(get_logger(), &quot;tcp in pallet_frame: x=%.3f y=%.3f z=%.3f&quot;, p.x, p.y, p.z);
+    } catch (const tf2::TransformException &amp; e) {
+      RCLCPP_WARN(get_logger(), &quot;%s&quot;, e.what());
+    }
+  }
+  tf2_ros::Buffer buf_;                         // filled from /tf and /tf_static by the listener
+  tf2_ros::TransformListener listener_;         // owns a spinning thread of its own
+  tf2_ros::StaticTransformBroadcaster static_br_;
+  tf2_ros::TransformBroadcaster br_;
+  rclcpp::TimerBase::SharedPtr belt_timer_, report_timer_;
+  double y_{-0.7};
+};
+
+int main(int argc, char ** argv) {
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared&lt;TfDemo&gt;());
+  rclcpp::shutdown();
+}
+</code></pre>
+<p>Add to <code>ros2_basics/CMakeLists.txt</code>: <code>find_package(tf2_ros REQUIRED)</code>, <code>find_package(geometry_msgs REQUIRED)</code>, <code>add_executable(tf_demo src/tf_demo.cpp)</code>, <code>ament_target_dependencies(tf_demo rclcpp tf2_ros geometry_msgs)</code>, and <code>tf_demo</code> in the <code>install(TARGETS …)</code> list; <code>&lt;depend&gt;tf2_ros&lt;/depend&gt;</code> and <code>&lt;depend&gt;geometry_msgs&lt;/depend&gt;</code> in <code>package.xml</code>.</p>
+<p>Transforming a message instead of a matrix: <code>tf2::doTransform(pose_in, pose_out, buf_.lookupTransform("world", pose_in.header.frame_id, tf2::TimePointZero))</code> from <code>tf2_geometry_msgs/tf2_geometry_msgs.hpp</code>.</p>
+<h2 id="run">Run</h2>
+<pre><code class="language-bash">ros2 launch cell_description view_cell.launch.py        # terminal 1
+ros2 run ros2_basics tf_demo                            # terminal 2
+ros2 run tf2_ros tf2_echo world tcp                     # terminal 3: compare with the TF display in RViz
+ros2 run tf2_tools view_frames                          # writes frames_&lt;date&gt;.pdf: the whole tree
+</code></pre>
+<p>In RViz, enable TF → Frames → <code>box_1</code>, <code>box_belt</code>, <code>tcp</code>, <code>camera_optical_frame</code>. Check that the camera's blue (z) axis points at the floor and the TCP's blue axis points out of the pad.</p>
+<h2 id="checkpoint">Checkpoint</h2>
+<ul>
+<li>[ ] <code>tf2_echo world tcp</code> matches what you read in RViz after moving a slider</li>
+<li>[ ] <code>colcon test</code> passes both geometry tests</li>
+<li>[ ] You computed by hand the world position of <code>box_1</code>'s top-face center and confirmed it with <code>tf2_echo world box_1</code> (expected x = −0.25, y = 0.90, z = 0.144 + 0.15)</li>
+<li>[ ] You can say which frame a point cloud from <code>/camera/points</code> is in, and which lookup converts it to <code>pallet_frame</code></li>
+</ul>
+<h2 id="questions">Questions</h2>
+<ol>
+<li>What does <code>lookupTransform("tcp", "world")</code> give you?</li>
+<li>Why is <code>box_1</code> static but <code>box_belt</code> dynamic, and why does the difference matter?</li>
+</ol>
+<p>Answers: <a href="appendix.html">Appendix</a></p><footer><a class="prev" href="ch03.html">&larr; Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a class="next" href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3) &rarr;</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>

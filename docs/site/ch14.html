@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html" class="current">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="ch-14-mock-conveyor-io-palletizing-end-to-end-week-9">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</h1>
+<p>Goal: a <code>mock_conveyor</code> with a photo-eye and two PLC-style commands, and an executive that palletizes from the belt using the Ch 12 pattern. At the end you palletize twelve boxes, then depalletize them back onto the belt.</p>
+<h2 id="io-the-way-a-cell-sees-it">I/O, the way a cell sees it</h2>
+<table>
+<thead>
+<tr>
+<th>Real device</th>
+<th>Signal</th>
+<th>Mock</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Photo-eye at the pick point</td>
+<td>digital input, 1 = blocked</td>
+<td><code>/photo_eye</code> (Bool, 20 Hz)</td>
+</tr>
+<tr>
+<td>Barcode scanner / WMS message</td>
+<td>SKU of the box at the eye</td>
+<td><code>/conveyor/sku</code> (String)</td>
+</tr>
+<tr>
+<td>Outfeed belt "index" command</td>
+<td>PLC output + done signal</td>
+<td><code>conveyor/index_out</code> (Trigger, returns when the eye clears)</td>
+</tr>
+<tr>
+<td>Infeed belt "feed next" command</td>
+<td>PLC output + done signal</td>
+<td><code>conveyor/feed_in</code> (Trigger, returns when the eye blocks)</td>
+</tr>
+<tr>
+<td>Vacuum switch</td>
+<td>digital input</td>
+<td><code>/gripper/vacuum</code> (Ch 8)</td>
+</tr>
+</tbody>
+</table>
+<p>A PLC handshake is a service with a long response time: the request is the output you set, the response is the input you wait for.</p>
+<h2 id="cell_simcell_simmock_conveyorpy"><code>cell_sim/cell_sim/mock_conveyor.py</code></h2>
+<p>The belt runs along +y of <code>conveyor_frame</code>, which is aligned with <code>world</code>, so y values are the same in both frames. <code>world/spawn_box</code> is an upsert: spawning an existing id moves it, which is how the belt moves boxes without a second interface. (Python, like the rest of the twin.)</p>
+<pre><code class="language-python">import time, rclpy
+from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
+from geometry_msgs.msg import Vector3
+from cell_interfaces.msg import Box, BoxArray
+from cell_interfaces.srv import SpawnBox
+from cell_sim.geometry import trans, pose_from_mat
+from cell_sim.spawn_scene import SKUS
+
+EYE_Y, END_Y, START_Y = 0.0, 0.75, -0.70     # along the belt
+
+class MockConveyor(Node):
+    &quot;&quot;&quot;A belt with a photo-eye at the robot's pick point and two PLC-style commands.&quot;&quot;&quot;
+
+    def __init__(self):
+        super().__init__('mock_conveyor')
+        self.declare_parameter('speed_mps', 0.2)
+        self.declare_parameter('feed_sequence', 'AAAAAA')     # SKUs fed in order, repeating
+        self.declare_parameter('jam', False)                  # Ch 14 checkpoint: a stuck belt
+        cb = ReentrantCallbackGroup()
+        self.boxes, self.running, self.fed = [], False, 0
+        self.create_subscription(BoxArray, 'world/boxes', lambda m: setattr(self, 'boxes', m.boxes), 10, callback_group=cb)
+        self.spawn = self.create_client(SpawnBox, 'world/spawn_box', callback_group=cb)
+        self.pub_eye = self.create_publisher(Bool, 'photo_eye', 10)
+        self.pub_sku = self.create_publisher(String, 'conveyor/sku', 10)
+        self.create_service(Trigger, 'conveyor/index_out', self.index_out, callback_group=cb)
+        self.create_service(Trigger, 'conveyor/feed_in', self.feed_in, callback_group=cb)
+        self.create_timer(0.05, self.tick, callback_group=cb)
+
+    def on_belt(self):
+        return [b for b in self.boxes if b.location == 'conveyor']
+
+    def at_eye(self):
+        return [b for b in self.on_belt() if abs(b.pose.pose.position.y - EYE_Y) &lt; b.size.y / 2]
+
+    def tick(self):
+        eye = self.at_eye()
+        self.pub_eye.publish(Bool(data=bool(eye)))
+        self.pub_sku.publish(String(data=eye[0].sku if eye else ''))
+        if not self.running or self.get_parameter('jam').value:
+            return
+        dy = self.get_parameter('speed_mps').value * 0.05
+        for b in self.on_belt():
+            if b.pose.pose.position.y &gt;= END_Y:                 # parked at the end: downstream takes over
+                continue
+            b.pose.pose.position.y += dy
+            self.spawn.call_async(SpawnBox.Request(box=b))
+
+    def index_out(self, req, res):
+        &quot;&quot;&quot;Run until the box at the eye has left it, plus half a second.&quot;&quot;&quot;
+        self.running, t0 = True, time.monotonic()
+        while self.at_eye() and time.monotonic() - t0 &lt; 10.0:
+            time.sleep(0.05)
+        time.sleep(0.5); self.running = False
+        res.success, res.message = True, 'indexed'
+        return res
+
+    def feed_in(self, req, res):
+        &quot;&quot;&quot;Spawn the next box upstream and run until it blocks the eye.&quot;&quot;&quot;
+        seq = self.get_parameter('feed_sequence').value
+        sku = seq[self.fed % len(seq)]; self.fed += 1
+        b = Box(id=f'in_{self.fed:03d}', sku=sku, size=Vector3(x=SKUS[sku][0], y=SKUS[sku][1], z=SKUS[sku][2]))
+        b.pose.header.frame_id = 'conveyor_frame'
+        b.pose.pose = pose_from_mat(trans(0.0, START_Y, SKUS[sku][2] / 2))
+        self.spawn.call(SpawnBox.Request(box=b))
+        self.running, t0 = True, time.monotonic()
+        while not self.at_eye() and time.monotonic() - t0 &lt; 15.0:
+            time.sleep(0.05)
+        self.running = False
+        res.success = bool(self.at_eye()); res.message = f'{sku} at eye' if res.success else 'feed timeout'
+        return res
+
+def main():
+    rclpy.init(); n = MockConveyor()
+    ex = MultiThreadedExecutor(); ex.add_node(n); ex.spin()
+</code></pre>
+<p>Add it to <code>twin.launch.py</code> and the <code>mock_conveyor</code> entry point to <code>setup.py</code>.</p>
+<h2 id="the-pallet-plan-cell_planningincludecell_planningpalletizerhpp">The pallet plan: <code>cell_planning/include/cell_planning/palletizer.hpp</code></h2>
+<p>Both plans (single SKU here, mixed in Ch 15) share one small interface, so the executive does not care which one it holds.</p>
+<pre><code class="language-cpp">#pragma once
+#include &lt;memory&gt;
+#include &lt;optional&gt;
+#include &lt;utility&gt;
+#include &lt;vector&gt;
+#include &lt;cell_planning/patterns.hpp&gt;
+
+namespace cell_planning {
+
+using Placed = std::vector&lt;std::pair&lt;Isometry3d, BoxSize&gt;&gt;;     // belief: what sits on the pallet
+
+/// What the executive needs from any placement plan: a target for the next box, confirmed once it is placed.
+struct Plan {
+  virtual ~Plan() = default;
+  virtual std::optional&lt;Isometry3d&gt; target(const BoxSize &amp; size) = 0;   // box center in pallet_frame, or nothing when full
+  virtual void confirm() = 0;
+  virtual const Placed &amp; placed() const = 0;
+};
+
+/// Cursor over an interlocked single-SKU stack. target() is retried until confirm() advances it.
+class SingleSkuPlan : public Plan {
+public:
+  explicit SingleSkuPlan(int layers = 3, const BoxSize &amp; box = SKU_A) : box_(box) {
+    int L = 0;
+    for (const auto &amp; layer : stack(layers)) {
+      for (const auto &amp; p : placeOrder(layer)) targets_.emplace_back(L, p);
+      ++L;
+    }
+  }
+  std::optional&lt;Isometry3d&gt; target(const BoxSize &amp;) override {          // size ignored: every box is SKU_A
+    if (i_ &gt;= targets_.size()) return std::nullopt;
+    return boxPose(targets_[i_].second, targets_[i_].first, box_);
+  }
+  void confirm() override { placed_.emplace_back(*target(box_), box_); ++i_; }
+  const Placed &amp; placed() const override { return placed_; }
+
+private:
+  BoxSize box_;
+  std::vector&lt;std::pair&lt;int, Place&gt;&gt; targets_;
+  std::size_t i_ = 0;
+  Placed placed_;
+};
+
+}  // namespace cell_planning
+</code></pre>
+<h2 id="executive-changes">Executive changes</h2>
+<p>Four additions to Ch 13's <code>executive.cpp</code>; the whole loop follows so you can diff it against yours.</p>
+<ol>
+<li>Includes and members (<code>DROP_SLOTS</code>, <code>placed_</code> and <code>recordPlace</code> go away):</li>
+</ol>
+<pre><code class="language-cpp">#include &lt;std_msgs/msg/bool.hpp&gt;
+#include &lt;std_msgs/msg/string.hpp&gt;
+#include &lt;cell_planning/palletizer.hpp&gt;
+  // members
+  rclcpp::Client&lt;std_srvs::srv::Trigger&gt;::SharedPtr index_out_, feed_in_;
+  rclcpp::Subscription&lt;std_msgs::msg::Bool&gt;::SharedPtr eye_sub_;
+  rclcpp::Subscription&lt;std_msgs::msg::String&gt;::SharedPtr sku_sub_;
+  bool eye_ = false;
+  std::string sku_at_eye_;                                 // both guarded by mtx_
+  std::unique_ptr&lt;Plan&gt; plan_;
+</code></pre>
+<ol start="2">
+<li>In the constructor, the belt's commands and signals:</li>
+</ol>
+<pre><code class="language-cpp">    index_out_ = create_client&lt;std_srvs::srv::Trigger&gt;(&quot;conveyor/index_out&quot;, rmw_qos_profile_services_default, cb_);
+    feed_in_ = create_client&lt;std_srvs::srv::Trigger&gt;(&quot;conveyor/feed_in&quot;, rmw_qos_profile_services_default, cb_);
+    eye_sub_ = create_subscription&lt;std_msgs::msg::Bool&gt;(&quot;photo_eye&quot;, 10,
+      [this](std_msgs::msg::Bool::ConstSharedPtr m) { std::lock_guard&lt;std::mutex&gt; l(mtx_); eye_ = m-&gt;data; }, so);
+    sku_sub_ = create_subscription&lt;std_msgs::msg::String&gt;(&quot;conveyor/sku&quot;, 10,
+      [this](std_msgs::msg::String::ConstSharedPtr m) { std::lock_guard&lt;std::mutex&gt; l(mtx_); sku_at_eye_ = m-&gt;data; }, so);
+</code></pre>
+<ol start="3">
+<li>A helper for PLC-style commands (the request is the output you set, the response is the done signal):</li>
+</ol>
+<pre><code class="language-cpp">  std::pair&lt;bool, std::string&gt; callTrigger(rclcpp::Client&lt;std_srvs::srv::Trigger&gt;::SharedPtr &amp; client, std::chrono::seconds timeout) {
+    auto fut = client-&gt;async_send_request(std::make_shared&lt;std_srvs::srv::Trigger::Request&gt;());
+    if (fut.wait_for(timeout) != std::future_status::ready) return {false, &quot;timeout&quot;};
+    const auto r = fut.get();
+    return {r-&gt;success, r-&gt;message};
+  }
+</code></pre>
+<ol start="4">
+<li>In <code>planPick</code> the drop is always the eye: delete the slot lines and use <code>const Isometry3d T_place = CONVEYOR_TOP * trans(0.0, 0.0, size.z) * rotX(M_PI);</code>.</li>
+</ol>
+<p>The whole loop after these edits. Note the <code>max_boxes</code> check in <code>FEED</code>: the palletizing path never passes through <code>DETECT</code>, so without it <code>max_boxes: 12</code> would be ignored.</p>
+<pre><code class="language-cpp">  void execute(std::shared_ptr&lt;JobHandle&gt; gh) {
+    auto fb = std::make_shared&lt;RunJob::Feedback&gt;();
+    auto res = std::make_shared&lt;RunJob::Result&gt;();
+    const auto &amp; req = *gh-&gt;get_goal();
+    const std::string mode = req.mode;
+    std::string state = &quot;CAPTURE&quot;;
+    int moved = 0, retries = 0;
+    Dets dets;
+    std::optional&lt;PickPlace::Goal&gt; goal;
+    if (mode == &quot;palletize&quot;) { plan_ = std::make_unique&lt;SingleSkuPlan&gt;(3); state = &quot;FEED&quot;; }
+    scene_.clear();
+    while (true) {
+      fb-&gt;state = state; fb-&gt;boxes_moved = moved; gh-&gt;publish_feedback(fb);
+      RCLCPP_INFO(get_logger(), &quot;[%d] %s&quot;, moved, state.c_str());
+      if (gh-&gt;is_canceling()) { res-&gt;boxes_moved = moved; res-&gt;message = &quot;cancelled&quot;; gh-&gt;canceled(res); return; }
+
+      if (state == &quot;CAPTURE&quot;) {
+        clearFrame();
+        if (!capture()) { last_error_ = &quot;camera timeout&quot;; state = &quot;RECOVER&quot;; continue; }
+        state = &quot;DETECT&quot;;
+      } else if (state == &quot;DETECT&quot;) {
+        const auto f = waitFrame(2s);
+        if (!f) { last_error_ = &quot;no detections&quot;; state = &quot;RECOVER&quot;; continue; }
+        dets = *f;
+        if (dets.detections.empty() || (req.max_boxes &gt;= 0 &amp;&amp; moved &gt;= req.max_boxes)) { state = &quot;DONE&quot;; continue; }
+        state = &quot;SELECT&quot;;
+      } else if (state == &quot;FEED&quot;) {
+        if (req.max_boxes &gt;= 0 &amp;&amp; moved &gt;= req.max_boxes) { state = &quot;DONE&quot;; continue; }
+        const auto [ok, msg] = callTrigger(feed_in_, 30s);
+        if (!ok) { last_error_ = msg; state = &quot;RECOVER&quot;; continue; }
+        state = &quot;SELECT&quot;;
+      } else if (state == &quot;SELECT&quot;) {
+        goal = mode == &quot;depalletize&quot; ? planPick(dets) : planPlace();
+        state = goal ? &quot;PICK_PLACE&quot; : &quot;DONE&quot;;
+      } else if (state == &quot;PICK_PLACE&quot;) {
+        const auto [ok, msg] = runPick(*goal);
+        if (ok) {
+          ++moved; retries = 0;
+          if (mode == &quot;depalletize&quot;) { callTrigger(index_out_, 15s); state = &quot;CAPTURE&quot;; }
+          else { plan_-&gt;confirm(); state = &quot;FEED&quot;; }
+        } else { last_error_ = msg; state = &quot;RECOVER&quot;; }
+      } else if (state == &quot;RECOVER&quot;) {
+        ++retries;
+        RCLCPP_ERROR(get_logger(), &quot;recover (%d/3): %s&quot;, retries, last_error_.c_str());
+        if (last_error_.find(&quot;still holding&quot;) != std::string::npos || retries &gt; 3) { state = &quot;FAILED&quot;; continue; }
+        state = mode == &quot;depalletize&quot; ? &quot;CAPTURE&quot; : &quot;FEED&quot;;
+      } else {                                                          // DONE or FAILED
+        res-&gt;success = state == &quot;DONE&quot;; res-&gt;boxes_moved = moved; res-&gt;message = state;
+        if (res-&gt;success) gh-&gt;succeed(res); else gh-&gt;abort(res);
+        return;
+      }
+    }
+  }
+</code></pre>
+<p>And the new method:</p>
+<pre><code class="language-cpp">  /// Palletizing: the box at the eye goes to the next pattern slot.
+  std::optional&lt;PickPlace::Goal&gt; planPlace() {
+    std::string sku;
+    { std::lock_guard&lt;std::mutex&gt; l(mtx_); if (!eye_ || !SKUS.count(sku_at_eye_)) return std::nullopt; sku = sku_at_eye_; }
+    const BoxSize size = SKUS.at(sku);
+    const auto T_target = plan_-&gt;target(size);
+    if (!T_target) return std::nullopt;                                   // pallet full
+    const Isometry3d T_belt_box = CONVEYOR_TOP * trans(0.0, 0.0, size.z / 2);   // guides center the box, yaw 0
+    const auto [risk, T_pick] = bestGrasp(T_belt_box, size, {});
+    const Isometry3d T_wp = tf2::transformToEigen(buf_.lookupTransform(&quot;world&quot;, &quot;pallet_frame&quot;, tf2::TimePointZero, tf2::durationFromSec(1.0)));
+    const Isometry3d T_place = T_wp * topDownTcp(*T_target, size.z);      // pad on the box top, pattern yaw
+    scene_.clear();
+    int n = 0;
+    for (const auto &amp; [T, s] : plan_-&gt;placed()) scene_.add(&quot;pal_&quot; + std::to_string(n++), T, s);   // what we believe is on the pallet
+    PickPlace::Goal g;
+    g.box_id = &quot;belt&quot;;
+    g.pick_pose = stamped(T_pick);
+    g.place_pose = stamped(T_place);
+    g.box_size.x = size.x; g.box_size.y = size.y; g.box_size.z = size.z;
+    return g;
+  }
+</code></pre>
+<p>Pick and place use the same box-to-TCP relation (<code>topDownTcp</code> on both sides), so a pattern slot with yaw 90° simply turns the wrist during transit.</p>
+<h2 id="run-the-full-cycle">Run the full cycle</h2>
+<pre><code class="language-bash">ros2 launch cell_bringup cell.launch.py
+ros2 service call /world/reset std_srvs/srv/Trigger
+ros2 action send_goal /run_job cell_interfaces/action/RunJob &quot;{mode: palletize, strategy: single_sku, max_boxes: 12}&quot; --feedback
+# two interlocked layers now sit on the pallet; send them back:
+ros2 action send_goal /run_job cell_interfaces/action/RunJob &quot;{mode: depalletize, strategy: single_sku}&quot; --feedback
+</code></pre>
+<p>Watch the feed: a box appears at y = −0.7, rides to the eye, <code>/photo_eye</code> flips to true, the arm takes it to its pattern slot, <code>FEED</code> starts the next. Depalletizing afterwards sees layer B on top (four rotated boxes) and handles it without any special case: the detector reports yaw, <code>bestGrasp</code> follows it.</p>
+<p>Real cell: the belt is encoder-tracked and the PLC owns the handshakes; the robot controller receives "box present" and "SKU" and answers "box removed". Boxes on infeed belts are rarely centered, so most cells either add mechanical guides, a second camera over the belt, or measure the box in the gripper (Ch 18).</p>
+<h2 id="checkpoint">Checkpoint</h2>
+<ul>
+<li>[ ] <code>palletize</code> with <code>max_boxes: 12</code> ends with <code>boxes_moved: 12</code>; the mock camera's cloud shows layer B's four rotated boxes on top</li>
+<li>[ ] <code>depalletize</code> afterwards moves all 12 back; the belt parks them downstream in a line</li>
+<li>[ ] <code>feed_sequence: 'AB'</code> makes <code>planPlace</code> place a B box into an A slot. Explain what goes wrong physically (gaps, unstable layer) and why Ch 15 needs a different planner</li>
+<li>[ ] You added a <code>jam</code> parameter that stops the belt; <code>feed_in</code> then times out and the executive reaches <code>RECOVER</code> and then <code>FAILED</code></li>
+</ul>
+<h2 id="questions">Questions</h2>
+<ol>
+<li>Why is <code>index_out</code> a service and <code>/photo_eye</code> a topic?</li>
+<li>The executive trusts the box to be centered at the eye. Which Ch 11 risk does an off-center box create?</li>
+</ol>
+<p>Answers: <a href="appendix.html">Appendix</a></p><footer><a class="prev" href="ch13.html">&larr; Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a class="next" href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10) &rarr;</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>

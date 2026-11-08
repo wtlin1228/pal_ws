@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch 2 — Packages, custom interfaces, launch files (week 2)</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html" class="current">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="ch-2-packages-custom-interfaces-launch-files-week-2">Ch 2 — Packages, custom interfaces, launch files (week 2)</h1>
+<p>Goal: define the data model of the cell once (<code>cell_interfaces</code>) and learn to start many nodes with one command (<code>cell_bringup</code>). Everything later imports these types.</p>
+<h2 id="the-data-model">The data model</h2>
+<p>A box is the unit of work. Its pose is the <strong>center</strong> of the box, in a named frame, with its extents in the box's own axes.</p>
+<pre><code class="language-text">cell_interfaces/
+├── msg/Box.msg        msg/BoxArray.msg
+├── srv/SpawnBox.srv   srv/GetBoxes.srv   srv/SetSuction.srv
+└── action/PickPlace.action   action/RunJob.action
+</code></pre>
+<pre><code class="language-text"># msg/Box.msg
+string id                        # unique, e.g. &quot;box_007&quot;
+string sku                       # &quot;A&quot;, &quot;B&quot; … or a barcode
+geometry_msgs/PoseStamped pose   # center of the box; pose.header.frame_id names the frame
+geometry_msgs/Vector3 size       # x, y, z extents [m] along the box's own axes
+string location                  # &quot;pallet&quot; | &quot;conveyor&quot; | &quot;gripper&quot; | &quot;unknown&quot;
+</code></pre>
+<pre><code class="language-text"># msg/BoxArray.msg
+std_msgs/Header header
+Box[] boxes
+</code></pre>
+<pre><code class="language-text"># srv/SpawnBox.srv
+Box box
+---
+bool success
+string message
+
+# srv/GetBoxes.srv
+string location        # &quot;&quot; = all
+---
+Box[] boxes
+
+# srv/SetSuction.srv
+bool on
+---
+bool success
+string message
+</code></pre>
+<pre><code class="language-text"># action/PickPlace.action
+string box_id
+geometry_msgs/PoseStamped pick_pose    # TCP pose at grasp (Ch 11 explains why TCP, not box)
+geometry_msgs/PoseStamped place_pose   # TCP pose at release
+geometry_msgs/Vector3 box_size
+float64 approach_distance 0.15         # field default
+---
+bool success
+string message
+---
+string stage                           # APPROACH, DESCEND, GRIP, LIFT, TRANSIT, PLACE, RELEASE, RETREAT
+
+# action/RunJob.action
+string mode            # &quot;depalletize&quot; | &quot;palletize&quot;
+string strategy        # &quot;single_sku&quot; | &quot;mixed&quot;
+int32 max_boxes -1     # -1 = until empty/full
+---
+bool success
+int32 boxes_moved
+string message
+---
+string state
+int32 boxes_moved
+</code></pre>
+<h2 id="build-files">Build files</h2>
+<pre><code class="language-bash">cd ~/pal_ws/src &amp;&amp; ros2 pkg create --build-type ament_cmake cell_interfaces
+mkdir -p cell_interfaces/{msg,srv,action}   # then create the files above
+</code></pre>
+<pre><code class="language-cmake"># cell_interfaces/CMakeLists.txt
+cmake_minimum_required(VERSION 3.8)
+project(cell_interfaces)
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+rosidl_generate_interfaces(${PROJECT_NAME}
+  &quot;msg/Box.msg&quot; &quot;msg/BoxArray.msg&quot;
+  &quot;srv/SpawnBox.srv&quot; &quot;srv/GetBoxes.srv&quot; &quot;srv/SetSuction.srv&quot;
+  &quot;action/PickPlace.action&quot; &quot;action/RunJob.action&quot;
+  DEPENDENCIES std_msgs geometry_msgs)
+ament_export_dependencies(rosidl_default_runtime)
+ament_package()
+</code></pre>
+<pre><code class="language-xml">&lt;!-- cell_interfaces/package.xml: add inside &lt;package&gt; --&gt;
+&lt;buildtool_depend&gt;rosidl_default_generators&lt;/buildtool_depend&gt;
+&lt;depend&gt;std_msgs&lt;/depend&gt;
+&lt;depend&gt;geometry_msgs&lt;/depend&gt;
+&lt;depend&gt;action_msgs&lt;/depend&gt;
+&lt;exec_depend&gt;rosidl_default_runtime&lt;/exec_depend&gt;
+&lt;member_of_group&gt;rosidl_interface_packages&lt;/member_of_group&gt;
+</code></pre>
+<pre><code class="language-bash">cd ~/pal_ws &amp;&amp; colcon build --packages-select cell_interfaces &amp;&amp; source install/setup.bash
+ros2 interface show cell_interfaces/action/PickPlace
+ros2 interface show cell_interfaces/msg/Box
+</code></pre>
+<p>Use from C++: <code>#include &lt;cell_interfaces/msg/box.hpp&gt;</code>, <code>#include &lt;cell_interfaces/srv/set_suction.hpp&gt;</code>, <code>#include &lt;cell_interfaces/action/pick_place.hpp&gt;</code> (a CamelCase interface name becomes a snake_case file name). Packages that use them add <code>find_package(cell_interfaces REQUIRED)</code> and <code>cell_interfaces</code> in <code>ament_target_dependencies(...)</code> to <code>CMakeLists.txt</code>, and <code>&lt;depend&gt;cell_interfaces&lt;/depend&gt;</code> to <code>package.xml</code>.</p>
+<h2 id="launch-files">Launch files</h2>
+<p>A launch file is Python that builds a tree of actions: nodes, includes, arguments, conditions. That stays true in a C++ workspace: launch files are the one place where Python is the standard even for C++ nodes. Create <code>cell_bringup</code> (ament_cmake, no code) and start the Ch 1 nodes from one file.</p>
+<pre><code class="language-python"># cell_bringup/launch/basics.launch.py
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+def generate_launch_description():
+    period = LaunchConfiguration('period_s')
+    params = PathJoinSubstitution([FindPackageShare('cell_bringup'), 'config', 'basics.yaml'])
+    return LaunchDescription([
+        DeclareLaunchArgument('period_s', default_value='1.0'),
+        Node(package='ros2_basics', executable='photo_eye', output='screen',
+             parameters=[params, {'period_s': period}]),   # later entries override earlier ones
+        Node(package='ros2_basics', executable='suction', output='screen'),
+        Node(package='ros2_basics', executable='countdown', output='screen'),
+    ])
+</code></pre>
+<pre><code class="language-yaml"># cell_bringup/config/basics.yaml
+photo_eye:
+  ros__parameters:
+    period_s: 1.0
+</code></pre>
+<pre><code class="language-cmake"># cell_bringup/CMakeLists.txt (after find_package(ament_cmake REQUIRED))
+install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+ament_package()
+</code></pre>
+<pre><code class="language-bash">colcon build --symlink-install &amp;&amp; source install/setup.bash
+ros2 launch cell_bringup basics.launch.py period_s:=0.5
+ros2 launch cell_bringup basics.launch.py --show-args
+</code></pre>
+<p>Three launch idioms you will use constantly:</p>
+<table>
+<thead>
+<tr>
+<th>Idiom</th>
+<th>Code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Include another launch file</td>
+<td><code>IncludeLaunchDescription(PythonLaunchDescriptionSource([FindPackageShare('pkg'), '/launch/x.launch.py']), launch_arguments={'a': 'b'}.items())</code></td>
+</tr>
+<tr>
+<td>Run only if an argument is true</td>
+<td><code>Node(..., condition=IfCondition(LaunchConfiguration('use_rviz')))</code></td>
+</tr>
+<tr>
+<td>Remap a topic</td>
+<td><code>Node(..., remappings=[('points', '/camera/points')])</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="checkpoint">Checkpoint</h2>
+<ul>
+<li>[ ] <code>ros2 interface list | grep cell_interfaces</code> shows 7 entries</li>
+<li>[ ] <code>ros2 launch cell_bringup basics.launch.py</code> starts all three nodes and <code>period_s:=0.2</code> changes the rate</li>
+<li>[ ] You wrote a tiny <code>ros2_basics/src/box_pub.cpp</code> that publishes a <code>cell_interfaces::msg::BoxArray</code> with two boxes every second, and <code>ros2 topic echo /boxes</code> shows both</li>
+<li>[ ] You can explain why <code>Box.pose</code> is a <code>PoseStamped</code> rather than a <code>Pose</code></li>
+</ul>
+<h2 id="questions">Questions</h2>
+<ol>
+<li><code>PickPlace</code> takes TCP poses, not box poses. Which node converts a box pose into a TCP pose?</li>
+<li>Why is that conversion not the job of the motion server?</li>
+</ol>
+<p>Answers: <a href="appendix.html">Appendix</a></p><footer><a class="prev" href="ch01.html">&larr; Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a class="next" href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2) &rarr;</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>

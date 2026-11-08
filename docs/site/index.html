@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html" class="current">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="ros-2-palletizing-depalletizing-12-week-hands-on-tutorial-c-edition">ROS 2 Palletizing &amp; Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</h1>
+<p>By week 12 you will run a UR10e that depalletizes and palletizes single-SKU and mixed-SKU boxes in a fully mocked cell: synthetic 3D camera, mocked robot joints, mocked suction and conveyor, all inside a VM. Every chapter is self-contained, ends with a checkpoint, and builds one piece of the final system.</p>
+<p>Prerequisites: comfortable C++17, a basic Linux shell, and the linear algebra of 4 × 4 transforms (refreshed in Ch 4). No prior ROS is assumed.</p>
+<p><strong>Language rule.</strong> Every node and library the robot software is made of is C++: <code>rclcpp</code>, Eigen, OpenCV, MoveIt's <code>MoveGroupInterface</code>, BehaviorTree.CPP. Python remains only where production cells keep it too: the mock devices of the digital twin (Ch 8, 9, 14), launch files and launch tests.</p>
+<h2 id="target-stack">Target stack</h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Choice</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ROS 2</td>
+<td>Jazzy Jalisco on Ubuntu 24.04 (arm64 for UTM on Apple Silicon, amd64 for KVM)</td>
+<td>LTS until May 2029; MoveIt 2, UR packages and most online answers target it. Lyrical Luth (May 2026, Ubuntu 26.04) also works: replace <code>jazzy</code> with <code>lyrical</code> once downstream packages are released there.</td>
+</tr>
+<tr>
+<td>Robot model</td>
+<td>UR10e from <code>ur_description</code> + a suction gripper you write in Xacro</td>
+<td>Real industrial kinematics, 1.3 m reach, no driver or network needed</td>
+</tr>
+<tr>
+<td>Motion</td>
+<td>ros2_control mock hardware → MoveIt 2 (OMPL + Pilz planners)</td>
+<td>Identical stack to a real UR driver; only the hardware plugin changes</td>
+</tr>
+<tr>
+<td>Vision</td>
+<td>Mock camera node publishing <code>sensor_msgs/PointCloud2</code>; height-map box detector you write</td>
+<td>Swap the mock node for a real camera driver later</td>
+</tr>
+<tr>
+<td>Task logic</td>
+<td>C++ (rclcpp) throughout the robot software; MoveGroupInterface, Eigen, OpenCV, BehaviorTree.CPP optional</td>
+<td>What production cells run</td>
+</tr>
+<tr>
+<td>Physics</td>
+<td>None by default (kinematic digital twin in RViz); Gazebo in Ch 17</td>
+<td>VM-friendly, deterministic</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-cell-you-build">The cell you build</h2>
+<p>One UR10e on a 0.6 m pedestal, a half pallet (0.8 × 0.6 m) in front of it, a conveyor to its left, a 3D camera above the pallet. Depalletizing moves boxes pallet → conveyor; palletizing moves them conveyor → pallet. All positions are in the <code>world</code> frame on the floor; the pallet and conveyor frames are children of it (Ch 4).</p>
+<p><img src="img/cell-top-view.svg" alt="Cell top view: pallet in front of the robot, conveyor to the left, camera above the pallet" style="max-width:100%"></p>
+<p><img src="img/architecture.svg" alt="Node architecture: sensing flows into the executive, commands flow down to MoveIt and ros2_control" style="max-width:100%"></p>
+<p>RViz subscribes to joint states, TF, markers and the point cloud. The digital twin is the only part you swap when you go real.</p>
+<h2 id="workspace-layout">Workspace layout</h2>
+<p>All code lives in one colcon workspace. Each package appears in the chapter that introduces it.</p>
+<pre><code class="language-text">~/pal_ws/src/
+├── cell_interfaces/      # Box.msg, PickPlace.action, SetSuction.srv …   (Ch 2)
+├── cell_description/     # URDF/Xacro of robot + gripper + pallet + conveyor (Ch 3)
+├── cell_moveit_config/   # generated by MoveIt Setup Assistant            (Ch 6)
+├── cell_sim/             # Python twin: world_model, mock_gripper, mock_camera, mock_conveyor (Ch 8, 9, 14)
+├── cell_perception/      # box_detector: point cloud → Detection3DArray   (Ch 10)
+├── cell_planning/        # header-only C++: geometry, grasps, patterns, SKUs, mixed placement (Ch 4, 11–15)
+├── cell_motion/          # Robot over MoveGroupInterface, pick_place action server (Ch 7, 11)
+├── cell_executive/       # job state machine, RunJob action, BT sketch    (Ch 13–17)
+└── cell_bringup/         # launch files that start everything             (Ch 13)
+</code></pre>
+<h2 id="12-week-plan-about-2-hday-5-daysweek">12-week plan (about 2 h/day, 5 days/week)</h2>
+<table>
+<thead>
+<tr>
+<th>Week</th>
+<th>Chapters</th>
+<th>After this week you can</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><a href="ch00.html">Ch 0</a> · <a href="ch01.html">Ch 1</a></td>
+<td>Run ROS 2 in the VM; write nodes with topics, services, actions</td>
+</tr>
+<tr>
+<td>2</td>
+<td><a href="ch02.html">Ch 2</a> · <a href="ch03.html">Ch 3</a></td>
+<td>Define custom messages; show the whole cell in RViz</td>
+</tr>
+<tr>
+<td>3</td>
+<td><a href="ch04.html">Ch 4</a> · <a href="ch05.html">Ch 5</a></td>
+<td>Reason about frames with TF2; move mocked joints with ros2_control</td>
+</tr>
+<tr>
+<td>4</td>
+<td><a href="ch06.html">Ch 6</a> · <a href="ch07.html">Ch 7</a></td>
+<td>Plan collision-free motions with MoveIt from C++</td>
+</tr>
+<tr>
+<td>5</td>
+<td><a href="ch08.html">Ch 8</a> · <a href="ch09.html">Ch 9</a></td>
+<td>Run the digital twin: boxes, mock suction, synthetic point clouds</td>
+</tr>
+<tr>
+<td>6</td>
+<td><a href="ch10.html">Ch 10</a></td>
+<td>Detect boxes from point clouds with a height map</td>
+</tr>
+<tr>
+<td>7</td>
+<td><a href="ch11.html">Ch 11</a></td>
+<td>Generate pick poses, keep the planning scene in sync, attach boxes</td>
+</tr>
+<tr>
+<td>8</td>
+<td><a href="ch12.html">Ch 12</a> · <a href="ch13.html">Ch 13</a></td>
+<td>Generate single-SKU pallet patterns; depalletize end-to-end</td>
+</tr>
+<tr>
+<td>9</td>
+<td><a href="ch14.html">Ch 14</a></td>
+<td>Palletize end-to-end with a mock conveyor and I/O</td>
+</tr>
+<tr>
+<td>10</td>
+<td><a href="ch15.html">Ch 15</a></td>
+<td>Handle mixed SKUs: online placement and pick ordering</td>
+</tr>
+<tr>
+<td>11</td>
+<td><a href="ch16.html">Ch 16</a></td>
+<td>Recover from errors; replay rosbags as mock data; test the logic</td>
+</tr>
+<tr>
+<td>12</td>
+<td><a href="ch17.html">Ch 17</a> · <a href="ch18.html">Ch 18</a></td>
+<td>Add Gazebo physics or behavior trees; map every mock to a real cell</td>
+</tr>
+<tr>
+<td>Reference</td>
+<td><a href="appendix.html">Appendix</a> · <a href="reading-list.html">Reading list</a></td>
+<td>Look up answers, commands, fixes and the sources each chapter builds on</td>
+</tr>
+</tbody>
+</table>
+<h2 id="conventions">Conventions</h2>
+<ul>
+<li>Each chapter follows the same shape: Goal → Concepts → Build → Run → Checkpoint.</li>
+<li>Commands assume <code>~/pal_ws</code> with <code>source install/setup.bash</code> already done; the <code>$</code> prompt is omitted.</li>
+<li>Code blocks are complete files unless marked <code>// …</code>. Build after every chapter with <code>colcon build --symlink-install</code>.</li>
+<li>Checkpoints are tasks you tick off plus questions; answers are in the Appendix.</li>
+<li>Paragraphs marked <code>Real cell:</code> explain what replaces the mock in a production system like the ones you work with.</li>
+<li>This repository holds one tag per chapter and the final code on <code>master</code>: <code>git checkout ch05</code> shows the workspace as it should look after Ch 5, checkpoint exercises included.</li>
+</ul><footer><a class="next" href="appendix.html">Appendix — cheat sheet, troubleshooting, answers, sources &rarr;</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>

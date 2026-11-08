@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Appendix — cheat sheet, troubleshooting, answers, sources</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head><body>
+<nav><a class="brand" href="index.html">ROS 2 Palletizing &amp; Depalletizing</a><a href="index.html">ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a href="appendix.html" class="current">Appendix — cheat sheet, troubleshooting, answers, sources</a><a href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2)</a><a href="ch01.html">Ch 1 — ROS 2 core: nodes, topics, services, actions, parameters (week 1)</a><a href="ch02.html">Ch 2 — Packages, custom interfaces, launch files (week 2)</a><a href="ch03.html">Ch 3 — Describe the cell: URDF/Xacro, UR10e + suction gripper, RViz (week 2)</a><a href="ch04.html">Ch 4 — TF2: the frames of a robot cell (week 3)</a><a href="ch05.html">Ch 5 — ros2_control + mock hardware: making the robot move (week 3)</a><a href="ch06.html">Ch 6 — MoveIt 2 configuration with the Setup Assistant (week 4)</a><a href="ch07.html">Ch 7 — Programming motion: planners, Cartesian paths, IK (week 4)</a><a href="ch08.html">Ch 8 — The digital twin: world model, boxes, mock suction gripper (week 5)</a><a href="ch09.html">Ch 9 — Mock 3D camera: synthetic point clouds (week 5)</a><a href="ch10.html">Ch 10 — Box detection with height maps (week 6)</a><a href="ch11.html">Ch 11 — Pick planning and the planning scene (week 7)</a><a href="ch12.html">Ch 12 — Single-SKU pallet patterns (week 8)</a><a href="ch13.html">Ch 13 — Depalletizing end-to-end: the task executive (week 8)</a><a href="ch14.html">Ch 14 — Mock conveyor, I/O, palletizing end-to-end (week 9)</a><a href="ch15.html">Ch 15 — Mixed SKU: online placement and pick ordering (week 10)</a><a href="ch16.html">Ch 16 — Robustness: errors, recovery, rosbag replay, tests (week 11)</a><a href="ch17.html">Ch 17 (optional) — Gazebo physics and behavior trees (week 12)</a><a href="ch18.html">Ch 18 — Capstone and mapping the mocks to a real cell (week 12)</a><a href="reading-list.html">Reading list — what existing docs, books and papers add to this tutorial</a></nav>
+<main><h1 id="appendix-cheat-sheet-troubleshooting-answers-sources">Appendix — cheat sheet, troubleshooting, answers, sources</h1>
+<h2 id="commands-you-will-type-daily">Commands you will type daily</h2>
+<pre><code class="language-bash">cd ~/pal_ws &amp;&amp; colcon build --symlink-install &amp;&amp; source install/setup.bash
+colcon build --packages-select cell_planning          # one package
+colcon test --packages-select cell_planning cell_perception &amp;&amp; colcon test-result --verbose   # GoogleTest
+ros2 launch cell_bringup cell.launch.py                # the whole cell
+ros2 run cell_sim spawn_scene --scene single_sku --layers 2
+ros2 action send_goal /run_job cell_interfaces/action/RunJob &quot;{mode: depalletize, strategy: single_sku}&quot; --feedback
+ros2 topic echo /detections --once | head -40
+ros2 run tf2_ros tf2_echo world tcp
+ros2 run tf2_tools view_frames
+ros2 control list_controllers
+ros2 param set /mock_gripper fail_every_n 3
+rqt_graph; rqt_console; ros2 doctor --report
+</code></pre>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Cause</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RViz black or crashes in the VM</td>
+<td>no GPU OpenGL</td>
+<td><code>export LIBGL_ALWAYS_SOFTWARE=1</code></td>
+</tr>
+<tr>
+<td><code>ros2 topic echo /camera/points</code> shows nothing</td>
+<td>QoS mismatch</td>
+<td>subscribe best-effort (<code>--qos-reliability best_effort</code>, RViz Reliability Policy)</td>
+</tr>
+<tr>
+<td><code>Lookup would require extrapolation</code></td>
+<td>asked for a stamp the buffer lacks</td>
+<td>use <code>tf2::TimePointZero</code> for latest or a timeout; check <code>/tf_static</code> is published</td>
+</tr>
+<tr>
+<td>Cloud floats above the robot or is mirrored</td>
+<td>optical frame rotation wrong</td>
+<td><code>rpy="${pi} 0 0"</code> on <code>camera_optical_frame</code>; z must point down in RViz</td>
+</tr>
+<tr>
+<td><code>controller_manager</code> has no interfaces</td>
+<td><code>ros2_control_node</code> never got the URDF</td>
+<td>the <code>~/robot_description</code> remapping, or two <code>&lt;ros2_control&gt;</code> blocks</td>
+</tr>
+<tr>
+<td>MoveIt: goal state in collision</td>
+<td>pad touching the target box</td>
+<td>remove the target object before the descend (Ch 11)</td>
+</tr>
+<tr>
+<td>Cartesian path fraction &lt; 1</td>
+<td>collision or IK discontinuity on the line</td>
+<td>raise the approach, <code>use_pilz = true</code>, check joint limits</td>
+</tr>
+<tr>
+<td><code>No IK solution</code> near the pallet's far corner</td>
+<td>reach</td>
+<td>move the pallet 5 cm closer or lower the pedestal</td>
+</tr>
+<tr>
+<td>A future never completes inside a callback</td>
+<td>single-threaded executor</td>
+<td><code>MultiThreadedExecutor</code> + a <code>Reentrant</code> callback group, or a thread (Ch 1)</td>
+</tr>
+<tr>
+<td>Two boxes detected as one</td>
+<td>gap narrower than the point spacing</td>
+<td>widen the gap in the scene; on a real camera the edges split them</td>
+</tr>
+<tr>
+<td><code>spawn_scene</code> boxes appear in the wrong place</td>
+<td>spawned before TF was available</td>
+<td>start the twin after <code>robot_state_publisher</code></td>
+</tr>
+<tr>
+<td>Attached box stays after a crash</td>
+<td>stale scene</td>
+<td>detach all attached objects at startup (Ch 16)</td>
+</tr>
+<tr>
+<td>apt: Unable to locate package ros-jazzy-…</td>
+<td>not built for your architecture or distro yet</td>
+<td>drop that package from the command and rerun; of the UR packages only <code>ur_description</code> is required</td>
+</tr>
+<tr>
+<td>colcon build: <code>move_group_interface.hpp: No such file</code></td>
+<td>MoveIt older than 2.10 ships <code>.h</code> headers; or the planning-interface package is missing</td>
+<td>use the <code>.h</code> name, or <code>sudo apt install ros-jazzy-moveit-ros-planning-interface</code></td>
+</tr>
+<tr>
+<td><code>MoveGroupInterface</code>: <em>Robot model not loaded</em></td>
+<td>the node has no robot description</td>
+<td>start the node with <code>moveit_config.to_dict()</code> parameters, or check <code>move_group</code> publishes <code>/robot_description_semantic</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="answers-to-the-chapter-questions">Answers to the chapter questions</h2>
+<p>Try each question before reading its answer; the point of a checkpoint is to find out what you can explain without looking.</p>
+<p><strong>Ch 0.</strong> (1) The domain ID partitions the DDS network: nodes only discover others in the same domain. (2) ROS 2 discovery is multicast on the LAN, so your colleague's <code>talker</code> would join your graph and your <code>listener</code> would print their messages.</p>
+<p><strong>Ch 1.</strong> (1) A service: it is short and has no meaningful intermediate state. (2) <code>declare_parameter</code> only stores the value; nothing re-reads it unless you register a parameter callback.</p>
+<p><strong>Ch 2.</strong> (1) The executive (Ch 13), using the grasp rules of Ch 11. (2) The grasp strategy belongs to the application; a motion server that only knows TCP poses works unchanged for any gripper or strategy.</p>
+<p><strong>Ch 3.</strong> (1) Box heights become "z above the deck": layer 1 starts at z = 0. (2) Every planner would see an extra degree of freedom with no actuator behind it.</p>
+<p><strong>Ch 4.</strong> (1) The world origin as seen from the TCP: the inverse of the usual lookup. (2) <code>/tf_static</code> is sent once with transient-local QoS; a dynamic transform expires after <code>cache_time</code> (10 s by default), so a moving box must be re-published continuously.</p>
+<p><strong>Ch 5.</strong> (1) The trajectory controller uses velocity for its stopped-velocity check; the mock reports zero velocity, which passes. (2) Only the hardware plugin: <code>gz_ros2_control/GazeboSimSystem</code> (Ch 17).</p>
+<p><strong>Ch 6.</strong> (1) So that pose goals are pad poses; otherwise you offset every goal by 0.12 m yourself. (2) Pairs that are adjacent or can never touch are skipped at planning time; a wrong entry lets the planner drive one link into another.</p>
+<p><strong>Ch 7.</strong> (1) The straight line crosses a collision or an IK discontinuity: check the logged fraction, then try <code>use_pilz = true</code> or a higher approach. (2) The program must block on each motion while callbacks keep running in the executor thread.</p>
+<p><strong>Ch 8.</strong> (1) One internal frame keeps the mock physics simple; callers still think in <code>pallet_frame</code>. (2) Corners would be missed or false hits occur; the same bug would appear in the Ch 15 footprint checks.</p>
+<p><strong>Ch 9.</strong> (1) The camera publishes with sensor-data (best-effort) QoS; a reliable subscriber is incompatible and silently receives nothing. (2) The footprint corners: an axis-aligned box misjudges a rotated one.</p>
+<p><strong>Ch 10.</strong> (1) The pick order is top-down anyway, and lower boxes are partly occluded, so their rectangles would be wrong. (2) An L shape: two boxes merged at a corner, or a box plus a leaked lower neighbor.</p>
+<p><strong>Ch 11.</strong> (1) A 0.4 m box on the pad changes the swept volume; without it the planner clips the conveyor edge or the stack. (2) A stale attached object blocks every plan; Ch 16 clears the scene at startup.</p>
+<p><strong>Ch 12.</strong> (1) A box placed near the robot would sit under the arm's path to the far row, and the planner would have to go around it. (2) Nothing: <code>bestGrasp</code> already yaws the TCP with the box, and the place pose inherits the pattern's yaw, so the wrist turns 90° in transit.</p>
+<p><strong>Ch 13.</strong> (1) The top view cannot see the bottom of a box; the WMS can. (2) A reentrant callback group with a multithreaded executor, and the job runs in its own thread that waits on futures instead of spinning.</p>
+<p><strong>Ch 14.</strong> (1) A command with a completion is request/reply; a sensor state is a stream. (2) Pad overhang over the belt edge is harmless, but an off-center grasp shifts the box within its pattern slot and the stack drifts layer by layer.</p>
+<p><strong>Ch 15.</strong> (1) Touching a neighbor must block the placement, but a halo is not a surface a box can stand on. (2) It only costs a few milliseconds; removing it is an optimization, not a correctness fix.</p>
+<p><strong>Ch 16.</strong> (1) The executive would stop and wait for a person although the gripper is empty and work can continue. (2) Timing and closed-loop behavior: the recorded cloud never changes in response to your picks.</p>
+<p><strong>Ch 17.</strong> Truth lived in one node behind generic interfaces and the robot software never read it, so only <code>cell_sim</code> changes.</p>
+<h2 id="verified-against">Verified against</h2>
+<p>The pure algorithms of this tutorial (geometry, grasps, mock camera, detector, patterns, mixed placement) were run against the scenes described in Ch 8 before publication, in their Python form; the C++ versions are line-by-line ports of the same logic and could not be compiled against ROS 2 here, so expect the odd include path or signature to need a touch-up on first build. ROS 2 facts come from these pages, read on 2026-11-08:</p>
+<ul>
+<li><a href="https://discourse.openrobotics.org/t/ros-2-lyrical-luth-released/55021">ROS 2 Lyrical Luth released (May 2026, LTS to 2031, Ubuntu 26.04)</a></li>
+<li><a href="https://docs.ros.org/en/lyrical/Releases/Release-Lyrical-Luth.html">Lyrical Luth release page: platforms and Gazebo Jetty</a></li>
+<li><a href="https://docs.ros.org/en/jazzy/p/ur_robot_driver/doc/usage/move.html">ur_robot_driver usage: mock hardware and <code>initial_joint_controller:=joint_trajectory_controller</code></a></li>
+<li><a href="https://docs.ros.org/en/jazzy/p/ur_robot_driver/doc/usage/startup.html">ur_robot_driver startup arguments</a></li>
+<li><a href="https://github.com/UniversalRobots/Universal_Robots_ROS2_Description/blob/jazzy/urdf/ur_macro.xacro"><code>ur_macro.xacro</code> (Jazzy): <code>ur_robot</code> macro parameters</a></li>
+<li><a href="https://github.com/ros2/common_interfaces/blob/jazzy/sensor_msgs_py/sensor_msgs_py/point_cloud2.py"><code>sensor_msgs_py.point_cloud2</code> (Jazzy): <code>read_points_numpy</code>, <code>create_cloud_xyz32</code></a></li>
+</ul>
+<p>Not verified here: the exact MoveIt Setup Assistant page names (stable across Humble–Jazzy), apt package availability for arm64 on every package listed in Ch 0 (<code>ros-jazzy-ur</code> metapackage in particular; <code>ur_description</code> alone suffices), and Gazebo details in Ch 17.</p><footer><a class="prev" href="index.html">&larr; ROS 2 Palletizing & Depalletizing — 12-Week Hands-On Tutorial (C++ edition)</a><a class="next" href="ch00.html">Ch 0 — VM and ROS 2 setup (week 1, days 1–2) &rarr;</a></footer></main>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body></html>
