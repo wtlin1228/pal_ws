@@ -1,0 +1,3 @@
+photo_eye:
+  ros__parameters:
+    period_s: 1.0

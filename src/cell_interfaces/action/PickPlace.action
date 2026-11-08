@@ -1,0 +1,10 @@
+string box_id
+geometry_msgs/PoseStamped pick_pose    # TCP pose at grasp (Ch 11 explains why TCP, not box)
+geometry_msgs/PoseStamped place_pose   # TCP pose at release
+geometry_msgs/Vector3 box_size
+float64 approach_distance 0.15         # field default
+---
+bool success
+string message
+---
+string stage                           # APPROACH, DESCEND, GRIP, LIFT, TRANSIT, PLACE, RELEASE, RETREAT

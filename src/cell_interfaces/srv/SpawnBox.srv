@@ -1,0 +1,4 @@
+Box box
+---
+bool success
+string message

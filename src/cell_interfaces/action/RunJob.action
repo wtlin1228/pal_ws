@@ -1,0 +1,10 @@
+string mode            # "depalletize" | "palletize"
+string strategy        # "single_sku" | "mixed"
+int32 max_boxes -1     # -1 = until empty/full
+---
+bool success
+int32 boxes_moved
+string message
+---
+string state
+int32 boxes_moved

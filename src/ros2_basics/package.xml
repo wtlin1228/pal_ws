@@ -12,6 +12,7 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>example_interfaces</depend>
+  <depend>cell_interfaces</depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>
