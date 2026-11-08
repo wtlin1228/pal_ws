@@ -24,5 +24,6 @@ setup(
         'mock_gripper = cell_sim.mock_gripper:main',
         'spawn_scene = cell_sim.spawn_scene:main',
         'mock_camera = cell_sim.mock_camera:main',
+        'mock_conveyor = cell_sim.mock_conveyor:main',
     ]},
 )
