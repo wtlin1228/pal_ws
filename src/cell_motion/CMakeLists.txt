@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.8)
+project(cell_motion)
+set(CMAKE_CXX_STANDARD 17)
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(moveit_ros_planning_interface REQUIRED)
+find_package(moveit_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(cell_planning REQUIRED)
+find_package(cell_interfaces REQUIRED)
+
+add_executable(motion_demo src/motion_demo.cpp)
+target_include_directories(motion_demo PUBLIC include)
+ament_target_dependencies(motion_demo rclcpp moveit_ros_planning_interface moveit_msgs tf2_ros tf2_eigen geometry_msgs)
+target_link_libraries(motion_demo cell_planning::cell_planning)
+
+install(TARGETS motion_demo DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY include/ DESTINATION include)
+ament_package()
