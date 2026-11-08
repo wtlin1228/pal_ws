@@ -39,6 +39,11 @@ Visualization Manager:
       Style: Points
       Color Transformer: AxisColor
       Axis: Z
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Detections
+      Topic:
+        Value: /detections/markers
   Global Options:
     Fixed Frame: world
     Frame Rate: 30

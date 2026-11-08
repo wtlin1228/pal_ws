@@ -16,6 +16,9 @@
   <depend>geometry_msgs</depend>
   <depend>cell_planning</depend>
   <depend>cell_interfaces</depend>
+  <depend>std_srvs</depend>
+  <depend>vision_msgs</depend>
+  <depend>shape_msgs</depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>
