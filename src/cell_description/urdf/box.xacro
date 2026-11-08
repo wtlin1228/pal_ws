@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+  <!-- Ch 3 checkpoint: a reusable box link for later chapters (Gazebo models, static scene parts). -->
+  <xacro:macro name="box" params="name parent xyz size color:='0.9 0.38 0.15 1' mass:=1.0">
+    <link name="${name}">
+      <visual><geometry><box size="${size}"/></geometry><material name="${name}_m"><color rgba="${color}"/></material></visual>
+      <collision><geometry><box size="${size}"/></geometry></collision>
+      <inertial><mass value="${mass}"/><inertia ixx="0.01" iyy="0.01" izz="0.01" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <joint name="${parent}-${name}" type="fixed"><parent link="${parent}"/><child link="${name}"/><origin xyz="${xyz}"/></joint>
+  </xacro:macro>
+</robot>

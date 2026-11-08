@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<robot name="cell" xmlns:xacro="http://wiki.ros.org/xacro">
+  <xacro:arg name="ur_type" default="ur10e"/>
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+  <xacro:include filename="$(find cell_description)/urdf/suction_gripper.xacro"/>
+
+  <!-- cell dimensions [m]; keep them here, every chapter reads them -->
+  <xacro:property name="pedestal_h" value="0.60"/>
+  <xacro:property name="pallet_x"   value="0.80"/>
+  <xacro:property name="pallet_y"   value="0.60"/>
+  <xacro:property name="pallet_h"   value="0.144"/>
+  <xacro:property name="pallet_pos" value="0 0.75"/>
+  <xacro:property name="conv_top"   value="0.70"/>
+  <xacro:property name="cam_h"      value="2.20"/>
+
+  <xacro:macro name="fixed_box" params="name parent xyz size color">
+    <link name="${name}">
+      <visual><geometry><box size="${size}"/></geometry><material name="${name}_m"><color rgba="${color}"/></material></visual>
+      <collision><geometry><box size="${size}"/></geometry></collision>
+      <inertial><mass value="10"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <joint name="${parent}-${name}" type="fixed"><parent link="${parent}"/><child link="${name}"/><origin xyz="${xyz}"/></joint>
+  </xacro:macro>
+
+  <link name="world"/>
+
+  <xacro:fixed_box name="pedestal" parent="world" xyz="0 0 ${pedestal_h/2}" size="0.3 0.3 ${pedestal_h}" color="0.4 0.4 0.45 1"/>
+
+  <!-- UR10e: geometry only in Jazzy. If your ur_macro adds a ros2_control tag, pass generate_ros2_control_tag="false". -->
+  <xacro:ur_robot
+    name="ur10e" tf_prefix="" parent="world"
+    joint_limits_parameters_file="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"
+    kinematics_parameters_file="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"
+    physical_parameters_file="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"
+    visual_parameters_file="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"
+    safety_limits="true" safety_pos_margin="0.15" safety_k_position="20" force_abs_paths="false">
+    <origin xyz="0 0 ${pedestal_h}" rpy="0 0 0"/>
+  </xacro:ur_robot>
+
+  <xacro:suction_gripper parent="tool0"/>
+
+  <!-- pallet_frame sits on the TOP surface center: box z positions are heights above the deck -->
+  <link name="pallet_frame"/>
+  <joint name="world-pallet_frame" type="fixed"><parent link="world"/><child link="pallet_frame"/><origin xyz="${pallet_pos} ${pallet_h}"/></joint>
+  <xacro:fixed_box name="pallet" parent="pallet_frame" xyz="0 0 ${-pallet_h/2}" size="${pallet_x} ${pallet_y} ${pallet_h}" color="0.75 0.6 0.35 1"/>
+
+  <link name="conveyor_frame"/>
+  <joint name="world-conveyor_frame" type="fixed"><parent link="world"/><child link="conveyor_frame"/><origin xyz="-0.9 0 ${conv_top}"/></joint>
+  <xacro:fixed_box name="conveyor" parent="conveyor_frame" xyz="0 0 ${-conv_top/2}" size="0.5 1.5 ${conv_top}" color="0.3 0.3 0.3 1"/>
+
+  <!-- camera: optical frame convention is z forward (viewing), x right, y down -> roll by pi to look at the floor -->
+  <link name="camera_link"><visual><geometry><box size="0.1 0.05 0.04"/></geometry></visual></link>
+  <joint name="world-camera_link" type="fixed"><parent link="world"/><child link="camera_link"/><origin xyz="${pallet_pos} ${cam_h}"/></joint>
+  <link name="camera_optical_frame"/>
+  <joint name="camera_link-optical" type="fixed"><parent link="camera_link"/><child link="camera_optical_frame"/><origin rpy="${pi} 0 0"/></joint>
+</robot>

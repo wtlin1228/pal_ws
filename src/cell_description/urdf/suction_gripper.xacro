@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+  <!-- A foam suction gripper: body + pad + a TCP frame at the pad face. z of tool0 points out of the flange. -->
+  <xacro:macro name="suction_gripper" params="parent">
+    <link name="gripper_body">
+      <visual><origin xyz="0 0 0.05"/><geometry><cylinder radius="0.04" length="0.10"/></geometry>
+        <material name="dark"><color rgba="0.25 0.25 0.25 1"/></material></visual>
+      <collision><origin xyz="0 0 0.05"/><geometry><cylinder radius="0.04" length="0.10"/></geometry></collision>
+      <inertial><mass value="0.8"/><origin xyz="0 0 0.05"/><inertia ixx="0.001" iyy="0.001" izz="0.001" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <joint name="${parent}-gripper_body" type="fixed">
+      <parent link="${parent}"/><child link="gripper_body"/><origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+
+    <link name="suction_pad">
+      <visual><geometry><box size="0.25 0.15 0.02"/></geometry>
+        <material name="orange"><color rgba="0.9 0.38 0.15 1"/></material></visual>
+      <collision><geometry><box size="0.25 0.15 0.02"/></geometry></collision>
+      <inertial><mass value="0.4"/><inertia ixx="0.001" iyy="0.001" izz="0.001" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <joint name="gripper_body-suction_pad" type="fixed">
+      <parent link="gripper_body"/><child link="suction_pad"/><origin xyz="0 0 0.11"/>
+    </joint>
+
+    <!-- TCP: where the pad touches the box. All pick/place poses are expressed here. -->
+    <link name="tcp"/>
+    <joint name="suction_pad-tcp" type="fixed">
+      <parent link="suction_pad"/><child link="tcp"/><origin xyz="0 0 0.01"/>
+    </joint>
+  </xacro:macro>
+</robot>
