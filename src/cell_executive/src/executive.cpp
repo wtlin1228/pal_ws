@@ -1,4 +1,4 @@
-// Ch 13-14: depalletizing and palletizing jobs as an explicit state machine behind a RunJob action.
+// Ch 13-15: depalletizing and palletizing jobs (single and mixed SKU) as an explicit state machine behind a RunJob action.
 // Beliefs only: the last detection frame, the SKU table, and what it placed where. It never reads world_model.
 #include <algorithm>
 #include <chrono>
@@ -21,6 +21,7 @@
 #include <cell_planning/grasps.hpp>
 #include <cell_planning/skus.hpp>
 #include <cell_planning/palletizer.hpp>
+#include <cell_planning/mixed.hpp>
 #include <cell_executive/scene.hpp>
 #include <cell_motion/stamped.hpp>
 
@@ -98,7 +99,10 @@ private:
     int moved = 0, retries = 0;
     Dets dets;
     std::optional<PickPlace::Goal> goal;
-    if (mode == "palletize") { plan_ = std::make_unique<SingleSkuPlan>(3); state = "FEED"; }
+    if (mode == "palletize") {
+      if (req.strategy == "mixed") plan_ = std::make_unique<MixedPlan>(); else plan_ = std::make_unique<SingleSkuPlan>(3);
+      state = "FEED";
+    }
     scene_.clear();
     while (true) {
       fb->state = state; fb->boxes_moved = moved; gh->publish_feedback(fb);
@@ -143,29 +147,34 @@ private:
     }
   }
 
-  /// Highest box first; SKU height overrides the detector's; refuse risky grasps.
+  /// Highest SAFE box first; SKU height overrides the detector's; skip grasps that risk a double pick.
   std::optional<PickPlace::Goal> planPick(const Dets & dets) {
     auto top = [](const vision_msgs::msg::Detection3D & d) { return d.bbox.center.position.z + d.bbox.size.z / 2; };
-    const auto & d = *std::max_element(dets.detections.begin(), dets.detections.end(),
-                                       [&](const auto & a, const auto & b) { return top(a) < top(b); });   // highest top face
-    const auto [sku, size] = matchSku(d.bbox.size.x, d.bbox.size.y);
     auto sizeOf = [](const vision_msgs::msg::Detection3D & o) { return matchSku(o.bbox.size.x, o.bbox.size.y).second; };
-    Isometry3d T_box = matFromPose(d.bbox.center);
-    T_box.translation().z() = top(d) - size.z / 2;
-    std::vector<Neighbor> others;
-    for (const auto & o : dets.detections) if (o.id != d.id) others.push_back({matFromPose(o.bbox.center), sizeOf(o)});
-    const auto [risk, T_pick] = bestGrasp(T_box, size, others);
-    if (risk > 0.1) { RCLCPP_WARN(get_logger(), "%s: double-pick risk %.2f, skipping", d.id.c_str(), risk); return std::nullopt; }
-    scene_.sync(dets, sizeOf);
-    const Isometry3d T_wp = tf2::transformToEigen(buf_.lookupTransform("world", "pallet_frame", tf2::TimePointZero, tf2::durationFromSec(1.0)));
-    const Isometry3d T_place = CONVEYOR_TOP * trans(0.0, 0.0, size.z) * rotX(M_PI);   // TCP at box-top height over the eye
-    PickPlace::Goal g;
-    g.box_id = d.id;
-    g.pick_pose = stamped(T_wp * T_pick);
-    g.place_pose = stamped(T_place);
-    g.box_size.x = size.x; g.box_size.y = size.y; g.box_size.z = size.z;
-    RCLCPP_INFO(get_logger(), "%s: sku '%s' risk %.2f", d.id.c_str(), sku.c_str(), risk);
-    return g;
+    std::vector<const vision_msgs::msg::Detection3D *> order;
+    for (const auto & d : dets.detections) order.push_back(&d);
+    std::sort(order.begin(), order.end(), [&](const auto * a, const auto * b) { return top(*a) > top(*b); });   // highest top first
+    for (const auto * dp : order) {
+      const auto & d = *dp;
+      const auto [sku, size] = matchSku(d.bbox.size.x, d.bbox.size.y);
+      Isometry3d T_box = matFromPose(d.bbox.center);
+      T_box.translation().z() = top(d) - size.z / 2;
+      std::vector<Neighbor> others;
+      for (const auto & o : dets.detections) if (o.id != d.id) others.push_back({matFromPose(o.bbox.center), sizeOf(o)});
+      const auto [risk, T_pick] = bestGrasp(T_box, size, others);
+      if (risk > 0.1) { RCLCPP_WARN(get_logger(), "%s: double-pick risk %.2f, trying the next box", d.id.c_str(), risk); continue; }
+      scene_.sync(dets, sizeOf);
+      const Isometry3d T_wp = tf2::transformToEigen(buf_.lookupTransform("world", "pallet_frame", tf2::TimePointZero, tf2::durationFromSec(1.0)));
+      const Isometry3d T_place = CONVEYOR_TOP * trans(0.0, 0.0, size.z) * rotX(M_PI);   // TCP at box-top height over the eye
+      PickPlace::Goal g;
+      g.box_id = d.id;
+      g.pick_pose = stamped(T_wp * T_pick);
+      g.place_pose = stamped(T_place);
+      g.box_size.x = size.x; g.box_size.y = size.y; g.box_size.z = size.z;
+      RCLCPP_INFO(get_logger(), "%s: sku '%s' risk %.2f", d.id.c_str(), sku.c_str(), risk);
+      return g;
+    }
+    return std::nullopt;                                                  // nothing safe: DONE, a person looks
   }
 
   /// Palletizing: the box at the eye goes to the next pattern slot.
