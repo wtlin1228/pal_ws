@@ -1,4 +1,4 @@
-// Ch 13-16: depalletizing and palletizing jobs (single and mixed SKU), with recovery as an explicit state machine behind a RunJob action.
+// Ch 13-18: depalletizing and palletizing jobs (single and mixed SKU), with recovery and overlapped capture as an explicit state machine behind a RunJob action.
 // Beliefs only: the last detection frame, the SKU table, and what it placed where. It never reads world_model.
 #include <algorithm>
 #include <chrono>
@@ -87,7 +87,13 @@ private:
     const auto r = res_fut.get();
     return {r.result && r.result->success, r.result ? r.result->message : "no result"};
   }
-  void onStage(const PickPlace::Feedback & f) { RCLCPP_INFO(get_logger(), "   %s", f.stage.c_str()); }
+  void onStage(const PickPlace::Feedback & f) {
+    RCLCPP_INFO(get_logger(), "   %s", f.stage.c_str());
+    if (f.stage == "TRANSIT" && mode_ == "depalletize") {                  // Ch 18: the pallet is free once the box is lifted
+      clearFrame();
+      capture_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    }
+  }
 
   // ---- the loop ----
   void execute(std::shared_ptr<JobHandle> gh) {
@@ -95,6 +101,7 @@ private:
     auto res = std::make_shared<RunJob::Result>();
     const auto & req = *gh->get_goal();
     const std::string mode = req.mode;
+    mode_ = mode;
     std::string state = "CAPTURE";
     int moved = 0, retries = 0;
     Dets dets;
@@ -131,7 +138,7 @@ private:
         const auto [ok, msg] = runPick(*goal);
         if (ok) {
           ++moved; retries = 0; retries_ = 0;
-          if (mode == "depalletize") { callTrigger(index_out_, 15s); state = "CAPTURE"; }
+          if (mode == "depalletize") { callTrigger(index_out_, 15s); state = waitFrame(0ms) ? "DETECT" : "CAPTURE"; }   // Ch 18: the next frame is usually ready
           else { plan_->confirm(); state = "FEED"; }
         } else { last_error_ = msg; state = "RECOVER"; }
       } else if (state == "RECOVER") {
@@ -221,6 +228,7 @@ private:
   Dets::ConstSharedPtr frame_;
   std::string last_error_;
   int retries_ = 0;                                        // Ch 16: varies approach distance and grasp on retry
+  std::string mode_;
 };
 
 int main(int argc, char ** argv) {

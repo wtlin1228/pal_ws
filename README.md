@@ -45,3 +45,17 @@ launch files and launch tests, which is also where production cells keep it.
 The pure C++ libraries (`cell_planning`, `cell_perception`) and their tests were compiled and run against
 Eigen, OpenCV and GoogleTest before publication; the ROS nodes are written against the Jazzy APIs from the
 documentation and could not be compiled here, so expect the odd include path or signature to need a touch-up.
+
+## Capstone (Ch 18)
+
+```bash
+ros2 launch cell_bringup cell.launch.py 2>&1 | tee run.log
+ros2 param set /mock_conveyor feed_sequence ABCABCABCA
+ros2 action send_goal /run_job cell_interfaces/action/RunJob "{mode: palletize, strategy: mixed}" --feedback
+ros2 param set /mock_gripper fail_every_n 7; ros2 param set /mock_gripper drop_after_s 3.0
+ros2 action send_goal /run_job cell_interfaces/action/RunJob "{mode: depalletize, strategy: mixed}" --feedback
+python3 tools/job_stats.py run.log           # per-stage times, boxes per minute, recoveries
+```
+
+`master` differs from `ch16` in one optimization only: the executive triggers the next capture while the
+robot carries a box away (`onStage`), so `DETECT` usually finds a frame waiting.
