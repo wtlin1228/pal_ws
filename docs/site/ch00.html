@@ -20,7 +20,7 @@
 <tbody>
 <tr>
 <td>Backend</td>
-<td>Apple Virtualization (not QEMU emulation), Ubuntu 24.04 Server <strong>arm64</strong> ISO</td>
+<td>Virtualize (not Emulate) with the QEMU backend: leave “Use Apple Virtualization” unchecked, since UTM snapshots work only with QEMU; Ubuntu 24.04 Server <strong>arm64</strong> ISO</td>
 <td>QEMU/KVM, Ubuntu 24.04 Server <strong>amd64</strong> ISO</td>
 </tr>
 <tr>
@@ -35,7 +35,7 @@
 </tr>
 <tr>
 <td>Display</td>
-<td>Enable GPU acceleration (virtio-gpu); install <code>ubuntu-desktop-minimal</code> after the server install</td>
+<td>Leave hardware OpenGL acceleration off at first (software rendering is enough for this scene; try it later from a snapshot); install <code>ubuntu-desktop-minimal</code> after the server install</td>
 <td>virtio-gpu with 3D acceleration in virt-manager</td>
 </tr>
 <tr>
