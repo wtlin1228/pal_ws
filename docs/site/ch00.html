@@ -35,7 +35,7 @@
 </tr>
 <tr>
 <td>Display</td>
-<td>Leave hardware OpenGL acceleration off at first (software rendering is enough for this scene; try it later from a snapshot); install <code>ubuntu-desktop-minimal</code> after the server install</td>
+<td>Leave hardware OpenGL acceleration off at first (software rendering is enough for this scene; try it later from a snapshot); install <code>ubuntu-desktop-minimal</code> after the server install (see below)</td>
 <td>virtio-gpu with 3D acceleration in virt-manager</td>
 </tr>
 <tr>
@@ -46,6 +46,25 @@
 </tbody>
 </table>
 <p>Use the Server ISO plus a minimal desktop: fewer background services, lighter RViz. Clipboard and folder sharing: UTM supports SPICE agent (<code>spice-vdagent</code>) and <code>virtiofs</code> mounts; turn both on so you can edit code in your Mac editor if you prefer.</p>
+<h2 id="install-the-desktop">Install the desktop</h2>
+<p>The Server installer is a text UI: accept the defaults, use the whole disk, create your user, and tick <strong>Install OpenSSH server</strong> so you can paste commands from the host over <code>ssh</code> while the desktop is not there yet. After the first reboot, log in at the console and install the minimal desktop:</p>
+<pre><code class="language-bash">sudo apt update &amp;&amp; sudo apt upgrade -y
+sudo apt install -y ubuntu-desktop-minimal
+sudo systemctl set-default graphical.target
+</code></pre>
+<p>Guest tools give you a shared clipboard and a resizable window. On UTM (QEMU backend) and on virt-manager the same two packages do it:</p>
+<pre><code class="language-bash">sudo apt install -y spice-vdagent qemu-guest-agent
+</code></pre>
+<p>Shared folder (optional). In UTM: VM settings → Sharing → Shared Directory, mode <strong>VirtFS</strong>, pick a folder on the Mac. In virt-manager: Add Hardware → Filesystem, driver <strong>virtiofs</strong>, target path <code>share</code>. Then mount it in the guest, once, so it comes back after every reboot:</p>
+<pre><code class="language-bash">mkdir -p ~/share
+echo &quot;share $HOME/share virtiofs rw,nofail 0 0&quot; | sudo tee -a /etc/fstab
+sudo mount -a &amp;&amp; ls ~/share
+</code></pre>
+<p>Reboot into the graphical login:</p>
+<pre><code class="language-bash">sudo reboot
+</code></pre>
+<p>At the login screen click your name, then the gear icon in the bottom-right corner and choose <strong>Ubuntu on Xorg</strong>. Software-rendered RViz is more reliable on Xorg than on Wayland. Log in, open a terminal with Ctrl+Alt+T, and turn off screen blanking and automatic suspend (Settings → Power), or the VM will lock itself during long builds.</p>
+<p>Snapshot the VM now as <code>ch0-desktop</code>: a clean desktop is the cheapest state to roll back to if a ROS package install goes wrong.</p>
 <h2 id="install-ros-2-jazzy">Install ROS 2 Jazzy</h2>
 <pre><code class="language-bash">sudo apt update &amp;&amp; sudo apt install -y software-properties-common curl locales
 sudo locale-gen en_US en_US.UTF-8 &amp;&amp; sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
@@ -95,6 +114,7 @@ sudo apt install -y git tmux ros-jazzy-rqt-graph ros-jazzy-rqt-tf-tree
 <p>Snapshot the VM now (UTM: right-click the VM → Snapshots; virt-manager: View → Snapshots).</p>
 <h2 id="checkpoint">Checkpoint</h2>
 <ul>
+<li>[ ] The VM boots to the graphical login and Ctrl+Alt+T opens a terminal</li>
 <li>[ ] <code>printenv ROS_DISTRO</code> prints <code>jazzy</code> in a new terminal</li>
 <li>[ ] Talker/listener exchange messages</li>
 <li>[ ] <code>view_ur.launch.py</code> shows the UR10e and the sliders move it</li>
